@@ -1,0 +1,700 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EarlyData 营养健康行业信号雷达 · 经理演示版</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #162826;
+      --muted: #62716e;
+      --line: #dfe8e5;
+      --paper: #ffffff;
+      --wash: #f2f6f4;
+      --teal: #0f766e;
+      --teal-dark: #0a5953;
+      --teal-soft: #dff2ed;
+      --gold: #936719;
+      --gold-soft: #fff3d4;
+      --navy: #17324d;
+      --rose: #9d4545;
+      --rose-soft: #fae9e7;
+      --shadow: 0 18px 50px rgba(24, 61, 55, .10);
+    }
+
+    * { box-sizing: border-box; }
+    html { background: var(--wash); }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 88% 0, rgba(15, 118, 110, .10), transparent 28rem),
+        var(--wash);
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      line-height: 1.55;
+    }
+
+    button, input, textarea { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible {
+      outline: 3px solid rgba(15, 118, 110, .22);
+      outline-offset: 2px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+      min-height: 82px;
+      padding: 16px clamp(20px, 4vw, 64px);
+      color: #fff;
+      background: linear-gradient(112deg, #102f31, #144b49 68%, #1a5e56);
+    }
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 46px;
+      height: 46px;
+      flex: 0 0 46px;
+      border: 1px solid rgba(255,255,255,.45);
+      border-radius: 14px;
+      font: 700 13px/1 Georgia, serif;
+      letter-spacing: .08em;
+    }
+    .brand-copy { flex: 1; }
+    .brand-copy small { color: #bde2d9; font-weight: 800; letter-spacing: .14em; }
+    .brand-copy h1 { margin: 2px 0 0; font-size: clamp(20px, 2vw, 27px); line-height: 1.3; }
+    .share-pill {
+      padding: 7px 11px;
+      border: 1px solid rgba(255,255,255,.38);
+      border-radius: 999px;
+      font-size: 11px;
+      letter-spacing: .08em;
+    }
+
+    .demo-notice {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px clamp(20px, 4vw, 64px);
+      color: #6c511d;
+      background: #fff7df;
+      border-bottom: 1px solid #eadcaf;
+      font-size: 12px;
+    }
+    .notice-dot { width: 8px; height: 8px; border-radius: 50%; background: #d3982c; box-shadow: 0 0 0 4px rgba(211, 152, 44, .14); }
+
+    main { max-width: 1680px; margin: 0 auto; padding: 28px clamp(18px, 4vw, 56px) 64px; }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(420px, .65fr);
+      gap: 24px;
+      align-items: end;
+      margin-bottom: 24px;
+    }
+    .eyebrow { color: var(--teal); font-size: 11px; font-weight: 800; letter-spacing: .16em; }
+    .hero h2 { margin: 5px 0 8px; font: 650 clamp(27px, 3vw, 40px)/1.2 Georgia, "Noto Serif SC", serif; letter-spacing: -.02em; }
+    .hero p { max-width: 760px; margin: 0; color: var(--muted); font-size: 14px; }
+    .hero-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; }
+    .stat {
+      min-width: 0;
+      padding: 14px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      box-shadow: 0 8px 25px rgba(31, 62, 56, .04);
+    }
+    .stat strong { display: block; color: var(--navy); font: 700 24px/1 Georgia, serif; }
+    .stat span { display: block; margin-top: 7px; color: var(--muted); font-size: 11px; }
+
+    .workspace-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 18px;
+      padding: 12px 14px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+    .view-tabs, .queue-tabs { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+    .view-tab, .queue-tab, .ghost-button, .soft-button, .primary-button, .danger-button {
+      border: 0;
+      border-radius: 9px;
+      cursor: pointer;
+      font-weight: 750;
+    }
+    .view-tab { padding: 8px 13px; color: var(--muted); background: transparent; font-size: 13px; }
+    .view-tab.is-active { color: #fff; background: var(--teal); }
+    .queue-tabs { padding: 4px; border: 1px solid var(--line); border-radius: 11px; background: #f8faf9; }
+    .queue-tab { padding: 6px 10px; color: var(--muted); background: transparent; font-size: 11px; }
+    .queue-tab.is-active { color: var(--teal-dark); background: var(--teal-soft); }
+    .ghost-button { padding: 7px 11px; color: var(--muted); background: #f1f5f3; font-size: 11px; }
+
+    .view-panel[hidden] { display: none; }
+    .panel-heading { display: flex; justify-content: space-between; gap: 20px; align-items: end; margin-bottom: 12px; }
+    .panel-heading h3 { margin: 0; font: 650 22px/1.3 Georgia, "Noto Serif SC", serif; }
+    .panel-heading p { margin: 0; color: var(--muted); font-size: 12px; text-align: right; }
+
+    .board-wrap { overflow-x: auto; padding-bottom: 8px; }
+    .board {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(245px, 1fr));
+      gap: 13px;
+      min-width: 1270px;
+    }
+    .board-column {
+      min-height: 390px;
+      padding: 11px;
+      background: rgba(224, 232, 228, .62);
+      border: 1px solid var(--line);
+      border-radius: 15px;
+    }
+    .column-heading { display: flex; align-items: center; justify-content: space-between; padding: 3px 3px 11px; font-size: 13px; font-weight: 800; }
+    .column-heading span:last-child { display: grid; place-items: center; min-width: 24px; height: 24px; padding: 0 6px; border-radius: 999px; color: var(--muted); background: #fff; font-size: 11px; }
+    .column-cards { display: grid; gap: 9px; }
+    .empty-column { padding: 30px 8px; color: #81918d; text-align: center; font-size: 12px; }
+
+    .topic-card { overflow: hidden; background: #fff; border: 1px solid #dbe5e1; border-radius: 12px; box-shadow: 0 4px 13px rgba(30, 61, 55, .04); transition: .18s ease; }
+    .topic-card:hover { transform: translateY(-2px); border-color: #91c1b6; box-shadow: 0 10px 24px rgba(30, 61, 55, .09); }
+    .topic-card-main { width: 100%; padding: 13px; border: 0; color: inherit; background: transparent; cursor: pointer; text-align: left; }
+    .card-topline { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+    .score { color: var(--teal-dark); font-size: 11px; font-weight: 800; }
+    .chip { display: inline-flex; align-items: center; padding: 4px 8px; border-radius: 999px; color: var(--teal-dark); background: var(--teal-soft); font-size: 10px; font-weight: 800; }
+    .chip.watch { color: #704d15; background: #f8e9c4; }
+    .chip.gold { color: #785514; background: var(--gold-soft); }
+    .chip.gray { color: #596662; background: #edf1f0; }
+    .topic-card h4 { margin: 8px 0 9px; font-size: 14px; line-height: 1.5; }
+    .topic-card p { margin: 0 0 10px; color: var(--muted); font-size: 11px; }
+    .card-evidence { padding-top: 9px; border-top: 1px solid #edf1ef; color: #7d5a18; font-size: 10px; }
+    .card-click-hint { display: block; margin-top: 8px; color: var(--teal); font-size: 10px; font-weight: 800; }
+    .card-actions { display: flex; gap: 6px; padding: 8px 10px 10px; border-top: 1px solid #edf1ef; background: #fbfcfc; }
+    .card-actions button { flex: 1; padding: 7px 8px; border: 0; border-radius: 8px; color: var(--teal-dark); background: var(--teal-soft); cursor: pointer; font-size: 10px; font-weight: 800; }
+
+    .research-board { grid-template-columns: repeat(5, minmax(220px, 1fr)); min-width: 1140px; }
+    .research-card { padding: 14px; background: #fff; border: 1px solid #cfe0dc; border-radius: 12px; box-shadow: 0 5px 16px rgba(30,61,55,.05); }
+    .research-card button { width: 100%; padding: 0; border: 0; background: transparent; cursor: pointer; text-align: left; }
+    .research-card h4 { margin: 8px 0 8px; font-size: 14px; line-height: 1.5; }
+    .research-card p { margin: 0; color: var(--muted); font-size: 11px; }
+    .research-card footer { margin-top: 11px; padding-top: 9px; border-top: 1px solid #edf1ef; color: var(--teal); font-size: 10px; font-weight: 800; }
+
+    dialog {
+      width: min(920px, calc(100vw - 28px));
+      max-height: calc(100vh - 32px);
+      padding: 0;
+      border: 0;
+      border-radius: 19px;
+      color: var(--ink);
+      background: #fff;
+      box-shadow: 0 30px 90px rgba(10, 35, 31, .30);
+    }
+    dialog::backdrop { background: rgba(12, 34, 31, .62); backdrop-filter: blur(3px); }
+    .dialog-shell { position: relative; padding: 30px 38px 36px; }
+    .close-button { position: sticky; top: 0; z-index: 2; float: right; width: 36px; height: 36px; border: 0; border-radius: 50%; color: var(--muted); background: #edf3f0; cursor: pointer; font-size: 22px; line-height: 1; }
+    .dialog-kicker { color: var(--teal); font-size: 10px; font-weight: 800; letter-spacing: .14em; }
+    .dialog-title { max-width: 760px; margin: 7px 42px 10px 0; font: 650 clamp(23px, 3vw, 31px)/1.35 Georgia, "Noto Serif SC", serif; }
+    .chip-row { display: flex; gap: 7px; flex-wrap: wrap; }
+    .detail-summary { color: var(--muted); font-size: 13px; }
+    .detail-section { margin-top: 23px; padding-top: 20px; border-top: 1px solid var(--line); }
+    .detail-section h3 { margin: 0 0 11px; font-size: 14px; }
+    .detail-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .detail-field { padding: 12px; border-radius: 10px; background: #f5f8f7; }
+    .detail-field span { display: block; margin-bottom: 4px; color: var(--muted); font-size: 10px; }
+    .detail-field strong { display: block; font-size: 12px; }
+    .source-list { display: grid; gap: 8px; }
+    .source-item { display: flex; justify-content: space-between; gap: 14px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px; font-size: 12px; }
+    .source-item small { display: block; margin-top: 3px; color: var(--muted); }
+    .source-item b { color: var(--gold); font-size: 10px; white-space: nowrap; }
+    .dialog-actions { position: sticky; bottom: -36px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin: 24px -38px -36px; padding: 13px 38px; border-top: 1px solid var(--line); background: rgba(255,255,255,.96); backdrop-filter: blur(10px); }
+    .soft-button, .primary-button, .danger-button { padding: 9px 13px; font-size: 12px; }
+    .soft-button { color: var(--teal-dark); background: var(--teal-soft); }
+    .primary-button { color: #fff; background: var(--teal); }
+    .primary-button:hover { background: var(--teal-dark); }
+    .danger-button { color: var(--rose); background: var(--rose-soft); }
+    button:disabled { cursor: not-allowed; opacity: .55; }
+
+    .article-dialog { width: min(760px, calc(100vw - 28px)); background: #eef3f1; }
+    .article-dialog .dialog-shell { padding: 18px; }
+    .article-demo-banner { margin: 0 44px 10px 0; padding: 10px 13px; border-radius: 9px; color: #fff; background: #183f3a; font-size: 11px; letter-spacing: .06em; }
+    .wechat-article { overflow: hidden; background: #fff; box-shadow: 0 18px 50px rgba(27, 65, 59, .10); }
+    .article-head { padding: 30px 22px 22px; border-top: 5px solid var(--teal); border-bottom: 1px solid #e2ebe8; }
+    .article-head small { color: #71817e; letter-spacing: .1em; }
+    .article-head h2 { margin: 9px 0 10px; font-size: 25px; line-height: 1.42; }
+    .article-head p, .article-body p { margin: 0; color: #53625f; }
+    .article-warning { padding: 15px 22px; color: #76541a; background: #fff9eb; border-bottom: 1px solid #f0dfb6; font-size: 12px; }
+    .article-body { padding: 24px 22px 8px; }
+    .article-body p { margin-bottom: 15px; font-size: 15px; line-height: 1.9; }
+    .article-body h3 { margin: 23px 0 10px; font-size: 19px; }
+    .key-judgment { margin: 6px 0 20px; padding: 16px; border-left: 4px solid var(--teal); border-radius: 0 8px 8px 0; color: #183f3a; background: #eaf5f2; }
+    .key-judgment small, .key-judgment strong { display: block; }
+    .key-judgment small { margin-bottom: 6px; color: var(--teal); font-weight: 800; letter-spacing: .08em; }
+    .article-actions { margin: 4px 22px 24px; padding: 16px; border: 1px solid var(--line); border-radius: 9px; background: #f4f7f6; }
+    .article-actions h4 { margin: 0 0 9px; }
+    .article-actions p { margin: 7px 0; color: #455552; font-size: 13px; }
+    .evidence-note { padding: 18px 22px 22px; color: #667572; background: #f8faf9; border-top: 1px solid #e2ebe8; font-size: 11px; }
+    .evidence-note strong { display: block; margin-bottom: 7px; color: var(--gold); }
+
+    .research-status-box { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin: 14px 0; padding: 13px 14px; border: 1px solid #b9ddd3; border-radius: 10px; color: var(--teal-dark); background: var(--teal-soft); }
+    .research-status-box strong, .research-status-box span { display: block; }
+    .research-status-box span { margin-top: 3px; font-size: 11px; }
+    .research-form { display: grid; gap: 11px; }
+    .field { display: grid; gap: 5px; }
+    .field span { color: var(--muted); font-size: 10px; }
+    .field input, .field textarea { width: 100%; padding: 9px 10px; border: 1px solid #cfddd8; border-radius: 8px; color: var(--ink); background: #fff; }
+    .field textarea { min-height: 74px; resize: vertical; line-height: 1.55; }
+    .field-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 11px; }
+    .task-note { margin: 0; padding: 10px 12px; border-left: 3px solid var(--teal); color: var(--muted); background: #f5f8f7; font-size: 11px; }
+
+    .toast { position: fixed; right: 22px; bottom: 22px; z-index: 100; max-width: min(390px, calc(100vw - 44px)); padding: 11px 15px; border-radius: 10px; color: #fff; background: #163d39; box-shadow: var(--shadow); opacity: 0; transform: translateY(10px); pointer-events: none; transition: .2s ease; font-size: 12px; }
+    .toast.is-visible { opacity: 1; transform: translateY(0); }
+
+    .manager-footer { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; text-align: center; }
+
+    @media (max-width: 980px) {
+      .hero { grid-template-columns: 1fr; }
+      .hero-stats { max-width: 600px; }
+      .workspace-bar { align-items: flex-start; flex-direction: column; }
+    }
+    @media (max-width: 640px) {
+      .topbar { padding: 13px 16px; }
+      .brand-mark, .share-pill { display: none; }
+      .demo-notice { align-items: flex-start; padding: 9px 16px; }
+      main { padding: 22px 14px 48px; }
+      .hero-stats { grid-template-columns: repeat(2, 1fr); }
+      .panel-heading { align-items: flex-start; flex-direction: column; gap: 5px; }
+      .panel-heading p { text-align: left; }
+      .board, .research-board { grid-template-columns: repeat(5, minmax(82vw, 1fr)); min-width: max-content; }
+      .board-column { width: 82vw; }
+      .dialog-shell { padding: 25px 18px 28px; }
+      .detail-grid, .field-grid { grid-template-columns: 1fr; }
+      .dialog-actions { bottom: -28px; margin: 22px -18px -28px; padding: 12px 18px; }
+      .article-dialog .dialog-shell { padding: 0; }
+      .article-demo-banner { margin: 0; border-radius: 0; }
+      .article-dialog .close-button { margin: 10px 10px 0 0; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-mark" aria-hidden="true">ED</div>
+    <div class="brand-copy">
+      <small>EARLYDATA · CONTENT INTELLIGENCE</small>
+      <h1>营养健康行业信号雷达</h1>
+    </div>
+    <span class="share-pill">MANAGER DEMO · 单文件</span>
+  </header>
+
+  <div class="demo-notice">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <strong>可交互示意：</strong>
+    <span>本页所有数据均为界面演示，不代表真实行业结论；不联网、不保存，也不会触发研究或公众号发布。</span>
+  </div>
+
+  <main>
+    <section class="hero">
+      <div>
+        <span class="eyebrow">FROM SIGNALS TO DECISIONS</span>
+        <h2>先聚合主题，再形成值得研究的选题</h2>
+        <p>把公众号内容从“文章列表”整理成行业信号与选题包，保留人工判断、证据缺口和研究交接，让品牌方、原料商及企业决策者看到的不只是热度，而是下一步应判断什么。</p>
+      </div>
+      <div class="hero-stats" aria-label="演示期次概览">
+        <div class="stat"><strong>38</strong><span>示意文章</span></div>
+        <div class="stat"><strong>8</strong><span>聚合主题</span></div>
+        <div class="stat"><strong>10</strong><span>候选选题</span></div>
+        <div class="stat"><strong>1</strong><span>已选题</span></div>
+      </div>
+    </section>
+
+    <section class="workspace-bar" aria-label="演示控制">
+      <div class="view-tabs" aria-label="视图切换">
+        <button class="view-tab is-active" type="button" data-view="topicView">选题看板</button>
+        <button class="view-tab" type="button" data-view="researchView">研究任务</button>
+      </div>
+      <div class="queue-tabs" aria-label="审阅队列">
+        <button class="queue-tab is-active" type="button" data-track="research">值得研究</button>
+        <button class="queue-tab" type="button" data-track="watch">传播观察</button>
+        <button class="queue-tab" type="button" data-track="all">全部</button>
+      </div>
+      <button class="ghost-button" id="resetDemo" type="button">重置演示</button>
+    </section>
+
+    <section class="view-panel" id="topicView">
+      <div class="panel-heading">
+        <h3>选题看板</h3>
+        <p>点击任意卡片查看判断依据；已选题可以继续查看文章结构与研究任务书。</p>
+      </div>
+      <div class="board-wrap"><div class="board" id="topicBoard"></div></div>
+    </section>
+
+    <section class="view-panel" id="researchView" hidden>
+      <div class="panel-heading">
+        <h3>研究任务</h3>
+        <p>任务书必须由人工确认；确认后默认停在“待启动”，不会自动执行研究。</p>
+      </div>
+      <div class="board-wrap"><div class="board research-board" id="researchBoard"></div></div>
+    </section>
+
+    <p class="manager-footer">EarlyData · 经理演示版｜单文件 HTML，可直接发送和双击打开｜刷新页面即可恢复初始状态</p>
+  </main>
+
+  <dialog id="detailDialog" aria-labelledby="detailTitle">
+    <div class="dialog-shell">
+      <button class="close-button" type="button" data-close="detailDialog" aria-label="关闭选题详情">×</button>
+      <div id="detailContent"></div>
+    </div>
+  </dialog>
+
+  <dialog class="article-dialog" id="articleDialog" aria-labelledby="articleTitle">
+    <div class="dialog-shell">
+      <button class="close-button" type="button" data-close="articleDialog" aria-label="关闭文章预览">×</button>
+      <div class="article-demo-banner">微信公众号文章结构 Demo · 一手来源待补证 · 不可直接发布</div>
+      <article class="wechat-article">
+        <header class="article-head">
+          <small>EARLYDATA · 行业判断型内容</small>
+          <h2 id="articleTitle">胶原蛋白肽竞争进入下半场：品牌方下一步真正要比什么？</h2>
+          <p>当“有这个成分”逐渐变成基础配置，竞争焦点可能转向证据质量、消费场景与产品化效率。</p>
+        </header>
+        <div class="article-warning"><strong>Demo 提示：</strong>以下为文章结构示意，不是已经完成的深度研究，也不构成市场或功效结论。</div>
+        <section class="article-body">
+          <p>过去一段时间，胶原蛋白肽频繁出现在新品、原料发布和消费内容中。对企业而言，真正的问题已经不只是“这个成分有没有热度”，而是热度背后是否出现了足以改变竞争方式的新信号。</p>
+          <div class="key-judgment">
+            <small>核心判断假设</small>
+            <strong>当成分供给趋同，品牌竞争会更依赖证据表达、细分人群和稳定的产品体验；原料商的价值也会从供货进一步延伸到数据与应用支持。</strong>
+          </div>
+          <h3>01 先区分“传播增量”和“事实增量”</h3>
+          <p>多个公众号同时讨论同一概念，说明议题正在扩散，但不等于市场规模、功效证据或监管边界已经发生变化。正式研究需要把转载、企业叙事和一手数据分开。</p>
+          <h3>02 品牌方需要重新回答三个问题</h3>
+          <p>目标人群是否足够具体？产品体验能否稳定感知？现有证据能否支持对外表达？如果这三个问题没有答案，增加一个热门成分未必能形成长期差异。</p>
+          <h3>03 原料商的机会不只在“提供原料”</h3>
+          <p>原料商可以把应用数据、剂型适配、质量稳定性和合规表达整合成服务能力，帮助品牌降低产品开发与内容沟通的不确定性。</p>
+        </section>
+        <section class="article-actions">
+          <h4>企业下一步可以先做什么</h4>
+          <p>1. 核对市场热度是否有公开数据和一手公告支撑。</p>
+          <p>2. 对照竞品的人群、剂型、证据和渠道，不只比较成分表。</p>
+          <p>3. 把暂时无法确认的功效、监管和规模判断明确标记为“待补证”。</p>
+        </section>
+        <footer class="evidence-note">
+          <strong>证据状态：待补证</strong>
+          正式成稿应补充监管文件、开放论文或论文摘要、企业原始公告和可追溯的市场数据。本页仅用于展示最终微信公众号内容会是什么结构。
+        </footer>
+      </article>
+    </div>
+  </dialog>
+
+  <dialog id="researchDialog" aria-labelledby="researchTitle">
+    <div class="dialog-shell">
+      <button class="close-button" type="button" data-close="researchDialog" aria-label="关闭研究任务书">×</button>
+      <span class="dialog-kicker">RESEARCH BRIEF · HUMAN GATE</span>
+      <h2 class="dialog-title" id="researchTitle">胶原蛋白肽竞争进入下半场：研究任务书</h2>
+      <div class="research-status-box">
+        <div><strong id="taskStatusLabel">任务书待确认</strong><span id="taskStatusNote">可以编辑；确认后只进入“待启动”。</span></div>
+        <span class="chip" id="startModeChip">手动启动</span>
+      </div>
+      <form class="research-form" id="researchForm">
+        <label class="field"><span>核心研究问题</span><textarea name="researchQuestion" required>胶原蛋白肽相关内容的集中增长，反映的是传播扩散、真实需求变化，还是品牌和原料端竞争方式的变化？</textarea></label>
+        <div class="field-grid">
+          <label class="field"><span>目标读者</span><input name="audience" required value="品牌方、原料商及企业决策者"></label>
+          <label class="field"><span>决策用途</span><input name="decisionUse" required value="判断产品立项、证据建设和原料服务重点"></label>
+        </div>
+        <label class="field"><span>研究范围</span><textarea name="scope" required>区分公众号传播热度与事实增量；比较品牌产品、人群、剂型和证据表达；分析原料商可提供的应用与数据支持。</textarea></label>
+        <div class="field-grid">
+          <label class="field"><span>地域范围</span><input name="geography" required value="中国市场，必要时参考海外公开资料"></label>
+          <label class="field"><span>时间范围</span><input name="timeRange" required value="近 12 个月，必要时回溯关键背景"></label>
+        </div>
+        <label class="field"><span>判断维度（每行一项）</span><textarea name="dimensions" required>竞争动作与趋势
+产品与人群
+科研证据与科学叙事
+业务含义</textarea></label>
+        <label class="field"><span>待补证主张</span><textarea name="evidenceGaps" required>市场规模和增速；相关功效表达的证据强度；具体监管边界；主要企业新品与原料公告的真实性。</textarea></label>
+        <label class="field"><span>稿件要求</span><textarea name="outputRequirements" required>形成适合微信公众号阅读的文章型深度研究稿，聚焦一个核心判断，正文约 1800—2500 字；重要事实关联公开来源，无法补足的一手证据标记“待补证”。</textarea></label>
+        <p class="task-note">本单文件只演示交互。点击确认不会联网、不会运行 Agent，也不会保存到任何数据库。</p>
+        <div class="dialog-actions">
+          <button class="soft-button" type="button" data-close="researchDialog">暂不确认</button>
+          <button class="soft-button" id="saveTask" type="button">保存演示修改</button>
+          <button class="primary-button" id="confirmTask" type="submit">人工确认并进入待启动</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    const STATUS = {
+      candidate_pool: "候选池",
+      pending_decision: "待决策",
+      package_drafting: "选题包完善",
+      pending_confirmation: "待确认",
+      selected: "已选题",
+    };
+    const STATUS_ORDER = ["candidate_pool", "pending_decision", "package_drafting", "pending_confirmation", "selected"];
+    const NEXT_STATUS = {
+      candidate_pool: "pending_decision",
+      pending_decision: "package_drafting",
+      package_drafting: "pending_confirmation",
+      pending_confirmation: "selected",
+    };
+    const RESEARCH_STATUS = ["task_drafting", "pending_start", "researching", "draft_review", "completed"];
+    const RESEARCH_LABEL = {
+      task_drafting: "任务书待确认",
+      pending_start: "待启动",
+      researching: "研究中",
+      draft_review: "稿件待审",
+      completed: "已完成",
+    };
+
+    const initialCandidates = [
+      { id: 1, status: "candidate_pool", track: "research", score: 86, title: "保健食品备案原料目录扩容后，品牌方该如何重排新品节奏？", audience: "品牌方与法规负责人", sources: 3, independent: 2, risk: "监管原文待补证", whyNow: "多个行业账号开始集中讨论备案原料与新品机会。", question: "哪些变化是真实监管增量，哪些只是市场解读？", angle: "从立项节奏、产品组合和合规成本判断业务影响。", gap: "需要补充监管文件、适用范围和正式执行时间。" },
+      { id: 2, status: "candidate_pool", track: "research", score: 83, title: "NMN 讨论重新升温：企业应关注市场热度，还是合规边界？", audience: "品牌方、原料商及企业决策者", sources: 4, independent: 2, risk: "同稿传播较多", whyNow: "近期内容量上升，但独立信息增量尚不清晰。", question: "热度背后是否出现监管、科研或商业层面的新事实？", angle: "把传播热度、事实变化和企业行动分开。", gap: "需要核对监管口径、企业公告和公开科研证据。" },
+      { id: 3, status: "candidate_pool", track: "watch", score: 61, title: "GLP-1 热度外溢到营养品：新需求还是概念借势？", audience: "品牌与产品负责人", sources: 5, independent: 2, risk: "跨品类概念借势", whyNow: "多个渠道出现与体重管理相关的产品内容。", question: "是否形成可持续的营养需求和产品机会？", angle: "观察需求场景，不把话题热度直接当市场结论。", gap: "缺少公开销售数据、消费者研究和产品公告。" },
+      { id: 4, status: "candidate_pool", track: "research", score: 79, title: "合成生物学原料密集落地，原料商竞争会从产能转向什么？", audience: "原料商与企业决策者", sources: 3, independent: 3, risk: "产能与成本数据待核实", whyNow: "企业动作与行业内容同时增加。", question: "供给变化会怎样影响成本、质量和品牌合作方式？", angle: "从供给效率、质量稳定性和应用服务判断。", gap: "需要企业公告、产能信息与具体产品资料。" },
+      { id: 5, status: "candidate_pool", track: "watch", score: 58, title: "植物提取物新品集中发布：品类创新还是常规上新？", audience: "原料商与产品经理", sources: 4, independent: 1, risk: "企业稿源集中", whyNow: "展会前后新品信息密集出现。", question: "这些发布是否包含可验证的技术或应用增量？", angle: "把展会传播与真正的产品创新分开。", gap: "需要具体规格、应用数据和差异化证据。" },
+      { id: 6, status: "pending_decision", track: "research", score: 88, title: "辅酶 Q10 内容热度升温，品牌如何区分科学叙事与消费话术？", audience: "品牌内容与科研负责人", sources: 4, independent: 3, risk: "功效表述需谨慎", whyNow: "科研解读与产品传播同步增加。", question: "哪些说法有公开证据，哪些属于传播延伸？", angle: "把证据等级转化为内容与产品决策边界。", gap: "需要开放论文、监管要求和产品原始公告。" },
+      { id: 7, status: "pending_decision", track: "research", score: 82, title: "银发营养从品类机会走向渠道机会了吗？", audience: "品牌方、渠道方与企业决策者", sources: 3, independent: 2, risk: "缺少公开渠道数据", whyNow: "行业内容从产品需求转向渠道与服务模式。", question: "增长瓶颈究竟在产品、触达还是信任？", angle: "从人群、渠道和服务结构分析机会。", gap: "需要公开人群数据、渠道案例和企业公告。" },
+      { id: 8, status: "package_drafting", track: "research", score: 91, title: "功能性饮料正在重新定义“低糖 + 情绪价值”吗？", audience: "饮料品牌、原料商与产品负责人", sources: 5, independent: 3, risk: "趋势判断待数据支持", whyNow: "新品内容同时强调控糖、情绪和日常场景。", question: "产品创新是否形成稳定需求，而不只是营销叙事？", angle: "比较人群、场景、配方和渠道的共同变化。", gap: "需要新品原始资料、渠道数据和成分证据。" },
+      { id: 9, status: "pending_confirmation", track: "research", score: 93, title: "从备案与新品信息看益生菌赛道：增长是真实需求还是同质化扩张？", audience: "品牌方、原料商及企业决策者", sources: 6, independent: 4, risk: "市场规模待补证", whyNow: "备案、新品和菌株叙事持续增加。", question: "供给增加是否带来可持续的需求和差异化？", angle: "把备案、新品、菌株证据和渠道反馈放到同一框架。", gap: "需要备案原文、公开销售数据和菌株研究证据。" },
+      { id: 10, status: "selected", track: "research", score: 95, title: "胶原蛋白肽竞争进入下半场：品牌方下一步真正要比什么？", audience: "品牌方、原料商及企业决策者", sources: 6, independent: 4, risk: "功效与市场数据待补证", whyNow: "多个行业账号同时讨论新品、原料和消费趋势，但传播信息与一手事实仍需拆分。", question: "当成分供给趋同，竞争焦点是否转向证据、人群和产品化效率？", angle: "从品牌差异化与原料服务升级形成行业判断。", gap: "需要补充监管文件、公开论文、企业原始公告和市场数据。" },
+    ];
+
+    let candidates = initialCandidates.map(item => ({ ...item }));
+    let activeTrack = "research";
+    let taskStatus = "task_drafting";
+    let activeCandidateId = null;
+
+    const topicBoard = document.getElementById("topicBoard");
+    const researchBoard = document.getElementById("researchBoard");
+    const detailDialog = document.getElementById("detailDialog");
+    const detailContent = document.getElementById("detailContent");
+    const articleDialog = document.getElementById("articleDialog");
+    const researchDialog = document.getElementById("researchDialog");
+    const researchForm = document.getElementById("researchForm");
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>'"]/g, character => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
+      })[character]);
+    }
+
+    function renderTopicBoard() {
+      const visible = candidates.filter(candidate => activeTrack === "all" || candidate.track === activeTrack);
+      topicBoard.innerHTML = STATUS_ORDER.map(status => {
+        const cards = visible.filter(candidate => candidate.status === status);
+        return `
+          <section class="board-column">
+            <header class="column-heading"><span>${STATUS[status]}</span><span>${cards.length}</span></header>
+            <div class="column-cards">
+              ${cards.length ? cards.map(topicCardHtml).join("") : '<div class="empty-column">暂无卡片</div>'}
+            </div>
+          </section>
+        `;
+      }).join("");
+
+      topicBoard.querySelectorAll("[data-open-candidate]").forEach(button => {
+        button.addEventListener("click", () => openCandidate(Number(button.dataset.openCandidate)));
+      });
+      topicBoard.querySelectorAll("[data-open-article]").forEach(button => {
+        button.addEventListener("click", () => articleDialog.showModal());
+      });
+      topicBoard.querySelectorAll("[data-open-research]").forEach(button => {
+        button.addEventListener("click", openResearchTask);
+      });
+    }
+
+    function topicCardHtml(candidate) {
+      const extraActions = candidate.id === 10 && candidate.status === "selected" ? `
+        <div class="card-actions">
+          <button type="button" data-open-article="${candidate.id}">文章结构</button>
+          <button type="button" data-open-research="${candidate.id}">研究任务书</button>
+        </div>
+      ` : "";
+      return `
+        <article class="topic-card">
+          <button class="topic-card-main" type="button" data-open-candidate="${candidate.id}">
+            <span class="card-topline"><span class="score">辅助分 ${candidate.score}</span><span class="chip ${candidate.track === "watch" ? "watch" : ""}">${candidate.track === "research" ? "值得研究" : "传播观察"}</span></span>
+            <h4>${escapeHtml(candidate.title)}</h4>
+            <p>${escapeHtml(candidate.audience)}</p>
+            <div class="card-evidence">${candidate.sources} 个公众号 / 独立来源估算 ${candidate.independent} · ${escapeHtml(candidate.risk)}</div>
+            <span class="card-click-hint">点击查看判断依据 →</span>
+          </button>
+          ${extraActions}
+        </article>
+      `;
+    }
+
+    function openCandidate(candidateId) {
+      const candidate = candidates.find(item => item.id === candidateId);
+      if (!candidate) return;
+      activeCandidateId = candidateId;
+      const next = NEXT_STATUS[candidate.status];
+      const isSelected = candidate.id === 10 && candidate.status === "selected";
+      detailContent.innerHTML = `
+        <span class="dialog-kicker">TOPIC CANDIDATE · DEMO #${candidate.id}</span>
+        <h2 class="dialog-title" id="detailTitle">${escapeHtml(candidate.title)}</h2>
+        <div class="chip-row">
+          <span class="chip">${STATUS[candidate.status]}</span>
+          <span class="chip ${candidate.track === "watch" ? "watch" : ""}">${candidate.track === "research" ? "值得研究" : "传播观察"}</span>
+          <span class="chip gold">${escapeHtml(candidate.risk)}</span>
+        </div>
+        <p class="detail-summary">${escapeHtml(candidate.whyNow)}</p>
+        <section class="detail-section">
+          <h3>为什么值得判断</h3>
+          <div class="detail-grid">
+            ${detailField("目标读者", candidate.audience)}
+            ${detailField("样本情况", `${candidate.sources} 个公众号 / 独立来源估算 ${candidate.independent}`)}
+            ${detailField("核心问题", candidate.question)}
+            ${detailField("行业判断角度", candidate.angle)}
+          </div>
+        </section>
+        <section class="detail-section">
+          <h3>证据状态</h3>
+          <div class="source-list">
+            <div class="source-item"><span>公众号主题聚合<small>仅作为发现线索，不等于独立事实证据</small></span><b>发现源</b></div>
+            <div class="source-item"><span>${escapeHtml(candidate.gap)}<small>监管、功效、科研与市场数据需补充一手来源</small></span><b>待补证</b></div>
+          </div>
+        </section>
+        <section class="detail-section">
+          <h3>本页演示说明</h3>
+          <p class="task-note">“辅助分”只用于排序。任何候选都需要人工推进；本页操作只改变当前 HTML 的显示，刷新后恢复。</p>
+        </section>
+        <div class="dialog-actions">
+          <button class="soft-button" type="button" data-close="detailDialog">关闭</button>
+          ${isSelected ? '<button class="soft-button" type="button" id="detailArticleButton">查看文章结构</button><button class="primary-button" type="button" id="detailResearchButton">查看研究任务书</button>' : ""}
+          ${next ? `<button class="primary-button" type="button" id="advanceCandidate">演示推进到：${STATUS[next]}</button>` : ""}
+        </div>
+      `;
+      bindDynamicCloseButtons(detailContent);
+      const articleButton = document.getElementById("detailArticleButton");
+      if (articleButton) articleButton.addEventListener("click", () => { detailDialog.close(); articleDialog.showModal(); });
+      const researchButton = document.getElementById("detailResearchButton");
+      if (researchButton) researchButton.addEventListener("click", () => { detailDialog.close(); openResearchTask(); });
+      const advanceButton = document.getElementById("advanceCandidate");
+      if (advanceButton) advanceButton.addEventListener("click", advanceCandidate);
+      detailDialog.showModal();
+    }
+
+    function detailField(label, value) {
+      return `<div class="detail-field"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+    }
+
+    function advanceCandidate() {
+      const candidate = candidates.find(item => item.id === activeCandidateId);
+      if (!candidate || !NEXT_STATUS[candidate.status]) return;
+      const from = STATUS[candidate.status];
+      candidate.status = NEXT_STATUS[candidate.status];
+      const to = STATUS[candidate.status];
+      detailDialog.close();
+      renderTopicBoard();
+      showToast(`演示推进：${from} → ${to}。刷新页面即可恢复。`);
+    }
+
+    function renderResearchBoard() {
+      researchBoard.innerHTML = RESEARCH_STATUS.map(status => {
+        const hasTask = status === taskStatus;
+        return `
+          <section class="board-column">
+            <header class="column-heading"><span>${RESEARCH_LABEL[status]}</span><span>${hasTask ? 1 : 0}</span></header>
+            <div class="column-cards">
+              ${hasTask ? `
+                <article class="research-card">
+                  <button type="button" id="openTaskFromBoard">
+                    <span class="chip ${status === "pending_start" ? "gold" : ""}">${RESEARCH_LABEL[status]}</span>
+                    <h4>胶原蛋白肽竞争进入下半场：研究任务书</h4>
+                    <p>品牌方、原料商及企业决策者</p>
+                    <footer>点击查看任务范围 →</footer>
+                  </button>
+                </article>
+              ` : '<div class="empty-column">暂无任务</div>'}
+            </div>
+          </section>
+        `;
+      }).join("");
+      const taskButton = document.getElementById("openTaskFromBoard");
+      if (taskButton) taskButton.addEventListener("click", openResearchTask);
+    }
+
+    function openResearchTask() {
+      const isDraft = taskStatus === "task_drafting";
+      document.getElementById("taskStatusLabel").textContent = RESEARCH_LABEL[taskStatus];
+      document.getElementById("taskStatusNote").textContent = isDraft
+        ? "可以编辑；确认后只进入“待启动”。"
+        : "任务范围已人工确认；本 Demo 不会执行研究。";
+      document.getElementById("startModeChip").textContent = "手动启动";
+      Array.from(researchForm.elements).forEach(element => {
+        if (["BUTTON", "FIELDSET"].includes(element.tagName)) return;
+        element.disabled = !isDraft;
+      });
+      document.getElementById("saveTask").disabled = !isDraft;
+      document.getElementById("confirmTask").disabled = !isDraft;
+      document.getElementById("confirmTask").textContent = isDraft ? "人工确认并进入待启动" : "已人工确认";
+      researchDialog.showModal();
+    }
+
+    function setView(viewId) {
+      document.querySelectorAll(".view-panel").forEach(panel => { panel.hidden = panel.id !== viewId; });
+      document.querySelectorAll("[data-view]").forEach(button => button.classList.toggle("is-active", button.dataset.view === viewId));
+      document.querySelector(".queue-tabs").style.visibility = viewId === "topicView" ? "visible" : "hidden";
+      if (viewId === "researchView") renderResearchBoard();
+    }
+
+    function bindDynamicCloseButtons(root) {
+      root.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", () => document.getElementById(button.dataset.close).close()));
+    }
+
+    document.querySelectorAll("[data-close]").forEach(button => {
+      button.addEventListener("click", () => document.getElementById(button.dataset.close).close());
+    });
+    document.querySelectorAll("dialog").forEach(dialog => {
+      dialog.addEventListener("click", event => {
+        if (event.target === dialog) dialog.close();
+      });
+    });
+    document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => setView(button.dataset.view)));
+    document.querySelectorAll("[data-track]").forEach(button => {
+      button.addEventListener("click", () => {
+        activeTrack = button.dataset.track;
+        document.querySelectorAll("[data-track]").forEach(item => item.classList.toggle("is-active", item === button));
+        renderTopicBoard();
+      });
+    });
+    document.getElementById("saveTask").addEventListener("click", () => {
+      if (!researchForm.reportValidity()) return;
+      showToast("演示修改已保存到当前页面；关闭或刷新后不会保留。");
+    });
+    researchForm.addEventListener("submit", event => {
+      event.preventDefault();
+      if (!researchForm.reportValidity()) return;
+      taskStatus = "pending_start";
+      renderResearchBoard();
+      researchDialog.close();
+      setView("researchView");
+      showToast("任务书已人工确认，当前停在“待启动”；没有执行联网研究。");
+    });
+    document.getElementById("resetDemo").addEventListener("click", () => {
+      candidates = initialCandidates.map(item => ({ ...item }));
+      activeTrack = "research";
+      taskStatus = "task_drafting";
+      researchForm.reset();
+      document.querySelectorAll("[data-track]").forEach(button => button.classList.toggle("is-active", button.dataset.track === "research"));
+      setView("topicView");
+      renderTopicBoard();
+      renderResearchBoard();
+      showToast("演示已重置。所有状态都只存在于当前页面。" );
+    });
+
+    let toastTimer;
+    function showToast(message) {
+      const toast = document.getElementById("toast");
+      toast.textContent = message;
+      toast.classList.add("is-visible");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove("is-visible"), 3200);
+    }
+
+    renderTopicBoard();
+    renderResearchBoard();
+  </script>
+</body>
+</html>

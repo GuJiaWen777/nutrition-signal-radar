@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>营养健康行业信号雷达 · Demo</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-mark" aria-hidden="true">ED</div>
+    <div class="brand-copy">
+      <span class="eyebrow">EARLYDATA · LOCAL WORKBENCH</span>
+      <h1>营养健康行业信号雷达</h1>
+    </div>
+    <span class="demo-pill">LOCAL DEMO</span>
+  </header>
+
+  <div class="demo-notice" id="demoNotice">
+    <span class="notice-dot" aria-hidden="true"></span>
+    <strong>Demo 数据：</strong>
+    <span id="demoLabel">正在读取…</span>
+    <span class="notice-separator">·</span>
+    <span id="demoDescription"></span>
+  </div>
+
+  <section class="cycle-workspace" id="cycleWorkspace" aria-label="监测期次">
+    <div class="cycle-selector">
+      <label for="cycleSelect">监测期次</label>
+      <select id="cycleSelect" aria-label="选择监测期次"></select>
+      <span class="status-chip" id="cycleStatus">读取中</span>
+      <span class="cycle-dates" id="cycleDates"></span>
+    </div>
+    <div class="cycle-actions">
+      <button class="secondary-button" id="exportCycle" type="button">导出本期选题归档</button>
+      <button class="danger-button" id="closeCycle" type="button">关闭本期</button>
+      <button class="primary-button" id="newCycle" type="button">新建下一期</button>
+    </div>
+    <div class="cycle-export-path" id="cycleExportPath"></div>
+  </section>
+
+  <nav class="tabs" aria-label="工作台导航">
+    <button class="tab is-active" data-tab="overview">总览</button>
+    <button class="tab" data-tab="signals">行业信号</button>
+    <button class="tab" data-tab="board">选题看板</button>
+    <button class="tab" data-tab="research">研究与成稿</button>
+    <button class="tab" data-tab="sources">来源</button>
+  </nav>
+
+  <main>
+    <section class="panel is-active" id="overview">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">PIPELINE SNAPSHOT</span>
+          <h2>从来源文章到可判断的选题</h2>
+        </div>
+        <p>规则只负责聚合、排序和解释，不自动立项。所有卡片均保留人工决策。</p>
+      </div>
+      <div class="stats-grid" id="statsGrid"></div>
+      <div class="overview-grid">
+        <article class="surface process-card">
+          <div class="surface-title"><span>当前流程</span><span class="muted">0.1 Demo</span></div>
+          <ol class="process-list">
+            <li class="is-done"><span>01</span><div><strong>只读导入</strong><small>Excel、WeRSS 与未来 RedFox 共用文章契约</small></div></li>
+            <li class="is-done"><span>02</span><div><strong>主题聚合</strong><small>正文指纹 + 标题相似度 + 强主题词，可追溯</small></div></li>
+            <li class="is-done"><span>03</span><div><strong>行业信号</strong><small>区分公众号数与独立来源估算</small></div></li>
+            <li><span>04</span><div><strong>人工选题</strong><small>三步推进，评分不替你决定</small></div></li>
+            <li><span>05</span><div><strong>研究与成稿</strong><small>任务书、稿件与定稿分开审阅</small></div></li>
+          </ol>
+        </article>
+        <div class="priority-queues">
+          <article class="surface">
+            <div class="surface-title"><span>值得研究</span><button class="text-button" data-go="signals" data-set-signal-track="research">查看全部</button></div>
+            <p class="queue-description">监管、市场、科研与产品等决策信号；仍需人工确认和补证。</p>
+            <div id="researchSignals" class="top-list"></div>
+          </article>
+          <article class="surface">
+            <div class="surface-title"><span>传播观察</span><button class="text-button" data-go="signals" data-set-signal-track="watch">查看全部</button></div>
+            <p class="queue-description">会议活动、同稿扩散或尚未识别明确决策价值的线索。</p>
+            <div id="watchSignals" class="top-list"></div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="signals">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">INDUSTRY SIGNALS</span>
+          <h2>行业信号</h2>
+        </div>
+        <p>同稿传播会单独提示；“公众号数”不自动等于“独立证据数”。</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-main">
+          <div class="filter-group" aria-label="行业信号队列">
+            <button class="filter-button is-active" data-signal-track="research">值得研究</button>
+            <button class="filter-button" data-signal-track="watch">传播观察</button>
+            <button class="filter-button" data-signal-track="all">全部</button>
+          </div>
+          <label class="search-field">
+            <span>搜索</span>
+            <input id="signalSearch" type="search" placeholder="标题、事件或证据缺口">
+          </label>
+        </div>
+        <span class="result-count" id="signalCount"></span>
+      </div>
+      <div class="signal-grid" id="signalGrid"></div>
+    </section>
+
+    <section class="panel" id="board">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">EDITORIAL GATE</span>
+          <h2>选题看板</h2>
+        </div>
+        <p>默认按“待判断 → 待确认 → 已选题”查看；“值得研究 / 传播观察”只用于筛选，点击卡片完成下一步。</p>
+      </div>
+      <div class="toolbar">
+        <div class="toolbar-main">
+          <div class="filter-group" aria-label="选题审阅队列">
+            <button class="filter-button is-active" data-candidate-track="research">值得研究</button>
+            <button class="filter-button" data-candidate-track="watch">传播观察</button>
+            <button class="filter-button" data-candidate-track="all">全部</button>
+          </div>
+          <label class="search-field">
+            <span>搜索</span>
+            <input id="candidateSearch" type="search" placeholder="选题、受众或风险标签">
+          </label>
+        </div>
+        <span class="result-count" id="candidateCount"></span>
+      </div>
+      <div class="board" id="topicBoard"></div>
+      <details class="archive-box">
+        <summary>已归档 / 不做 <span id="archiveCount"></span></summary>
+        <div id="archiveList" class="archive-list"></div>
+      </details>
+    </section>
+
+    <section class="panel" id="research">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">RESEARCH &amp; ARTICLE REVIEW</span>
+          <h2>研究与成稿</h2>
+        </div>
+        <p>默认按“任务书 → 稿件 → 已定稿”查看；任务书经人工确认后，才可人工启动离线 Demo 初稿。</p>
+      </div>
+      <div class="research-board-notice">
+        <strong>当前是本地结构化 Demo</strong>
+        <span>不会联网、不会调用 DeepSeek、不会发布公众号；公众号线索始终保留“待补证”。</span>
+      </div>
+      <div class="research-task-list" id="researchTaskList"></div>
+    </section>
+
+    <section class="panel" id="sources">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">SOURCE COVERAGE</span>
+          <h2>Demo 来源</h2>
+        </div>
+        <p>这里只展示工作簿中的来源；正式营养健康监测名单将在 RedFox 接入后独立维护。</p>
+      </div>
+      <div class="surface table-wrap">
+        <table>
+          <thead><tr><th>公众号</th><th>文章</th><th>时间范围</th><th>数据状态</th></tr></thead>
+          <tbody id="sourceRows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="detailDialog" class="detail-dialog">
+    <div class="dialog-shell">
+      <button class="close-button" id="closeDialog" aria-label="关闭详情">×</button>
+      <div id="detailContent" class="detail-content"></div>
+    </div>
+  </dialog>
+
+  <dialog id="cycleDialog" class="cycle-dialog">
+    <form id="cycleForm" class="cycle-form">
+      <div>
+        <span class="eyebrow">NEW MONITORING CYCLE</span>
+        <h2>新建监测期次</h2>
+        <p>一个期次隔离本期信号和选题状态；来源文章仍在同一资料库中全局去重。</p>
+      </div>
+      <label class="form-field"><span>期次标识</span><input name="slug" required placeholder="例如 2026-w33"></label>
+      <label class="form-field"><span>期次名称</span><input name="label" required placeholder="例如 2026 年第 33 周"></label>
+      <div class="cycle-date-grid">
+        <label class="form-field"><span>开始日期</span><input name="start_date" type="date" required></label>
+        <label class="form-field"><span>结束日期</span><input name="end_date" type="date" required></label>
+      </div>
+      <label class="form-field"><span>数据截止时间（可选）</span><input name="data_cutoff" type="datetime-local"></label>
+      <div class="cycle-dialog-actions">
+        <button class="secondary-button" id="cancelCycle" type="button">取消</button>
+        <button class="primary-button" type="submit">创建空白期次</button>
+      </div>
+    </form>
+  </dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
