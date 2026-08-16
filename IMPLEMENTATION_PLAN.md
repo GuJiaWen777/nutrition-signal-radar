@@ -299,7 +299,7 @@ nutrition-signal-radar/
 
 2026-08-15 后端切换与通过：用户决定不再使用 Codex CLI，改试 pi coding-agent。本机 pi 0.84.1 已登录 deepseek provider；早期试装的 `npm:pi-search-multi` 在 Windows 下加载报解析错误，已卸载并改装 `npm:pi-web-access`（`web_search` / `fetch_content`，零配置 Exa）。`agent_gateway.py` 已实现 pi JSON 事件流调用、正文组装、工具调用与 URL 抽取、凭据脱敏和 `var/raw/agent/` 审计存档，`research smoke-test-pi --live` 为 P2-02 烟雾测试命令。烟雾测试已通过：Agent 实际执行 5 次网页工具调用，围绕题目返回 SAMR 官方公告等具体 URL，区分来源类型并标注待补证。P2-02 门禁满足，下一步可把真实公开来源写回研究任务、稿件与来源表并重跑 P2-03/P2-04。
 
-#### P2-03 稿件、来源与版本（离线工作流切片已完成）
+#### P2-03 稿件、来源与版本（离线与在线工作流切片已完成）
 
 - schema v7 已保存研究输入、运行状态、微信公众号正文、逐项来源、核心判断、不确定性和待补证项；稿件/来源与研究事件可相互追溯。
 - 已实现必须由人工点击的离线文章 Demo：它只组织任务书与公众号发现线索，不联网、不调用 DeepSeek、不新增事实，也不把发现线索升级为已核实来源。
@@ -307,13 +307,14 @@ nutrition-signal-radar/
 - 已实现人工确认后将当前版本写入 `var/.../article-drafts/task-NNNN/article-vNNN-final.md`；该操作不包含任何微信公众号草稿或发布动作。
 - 真实研究 Agent 必须等 P2-02 通过公开网页来源烟雾测试后，才可向同一模型写入可核验的一手来源；离线 Demo 不计入深度研究验收。
 - 研究范围实质变化时创建关联新任务；误建任务只取消留痕，不合并、不改挂稿件、不物理删除。
+- 在线切片：`research run --task-id N --live` 只能启动已人工确认的待启动任务；`run_online_research` 先把任务置为“研究中”，调用 pi（JSON 输出契约）检索公开网页，解析后写回 `research_drafts` V1 与逐条 `research_sources`。所有 Agent 来源固定为 `needs_evidence`，不得自动视为已核实；Agent 失败、超时或非 JSON 输出会把任务回退“待启动”并记录 `online_research_failed`，不伪造稿件。输入、事件流与输出存档到 `var/raw/agent/`。
 
 #### P2-04 研究看板与验收（离线工作流切片已完成）
 
 - 已增加独立“研究与成稿”看板和任务/稿件详情页。
 - 看板首页以“任务书、稿件、已定稿”呈现进度；任务详情使用下一步提示保留任务书确认、人工启动和稿件审阅门禁。
 - 已覆盖人工启动离线 Demo、退回重生成、人工编辑另存、人工确认最终 Markdown 的完整离线演练；自动启动仍保持未实现/默认关闭。
-- 等 P2-02 通过后，用真实公开来源和真实 Agent 重跑本节验收；不触发微信公众号动作。
+- P2-02 已通过，`research run --live` 已接入；首次真实验收将在操作者于看板确认一个选题包与研究任务书后，以真实任务重跑“启动 → 稿件 → 审阅 → 定稿”，不触发微信公众号动作。
 
 ## 6. 测试策略
 

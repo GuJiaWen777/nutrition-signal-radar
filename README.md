@@ -10,7 +10,7 @@
 
 2026-08-15 已完成首次真实数据演练：4 个优质库账号加庶正康讯广域库账号共 5 个来源启用。3 天回看同步得到 34 篇文章和 3 张行业信号卡并生成首份正式“本周信号快报”；随后完成 30 天回看同步，共沉淀 407 篇文章，并经 `knowledge-base backfill` 达到 407/407 正文全覆盖。初始 3 天窗口期次已关闭，新开 `cycle-2026-07-17-08-15` 演练期次重建出 254 个主题簇、15 个行业信号，并生成 30 天横向快报。本地知识库已固化不可覆盖快照 `var/knowledge-base/export-v003/`。Bonny营养领航已补录：RedFox 广域库作者名精确为“Bonny营养领航”，但广域关键词搜索无法按账号名枚举其文章，故启用人工链接补录路径（`sources import-article`），操作者提供的益生菌监管修订文章已入库。同日 P2-02 首次烟雾测试显示本机 Codex CLI 在 ChatGPT 登录态下无法执行 `codex exec`，自动研究接入继续停止；研究任务保持“待启动”，离线文章 Demo 仍是唯一稿件生成切片。
 
-同日已把纵向研究后端切换为 pi coding-agent：本机 pi 0.84.1 已登录 deepseek provider，并改装 `npm:pi-web-access`（`web_search` / `fetch_content`，零配置 Exa；`pi-search-multi` 因 Windows 解析错误已卸载）。`agent_gateway.py` 提供程序化调用与 `var/raw/agent/` 审计存档；`research smoke-test-pi --live` 已通过 P2-02 烟雾测试——围绕题目实际执行网页检索并返回 SAMR 官方公告等具体 URL、区分来源类型、标注待补证。RedFox 数据已落两层本地状态（SQLite 归一化文章 + `var/raw/redfox/` 脱敏原始响应），并新增 `knowledge-base export / backfill` 把知识库正文补全并固化版本化快照。
+同日已把纵向研究后端切换为 pi coding-agent：本机 pi 0.84.1 已登录 deepseek provider，并改装 `npm:pi-web-access`（`web_search` / `fetch_content`，零配置 Exa；`pi-search-multi` 因 Windows 解析错误已卸载）。`agent_gateway.py` 提供程序化调用与 `var/raw/agent/` 审计存档；`research smoke-test-pi --live` 已通过 P2-02 烟雾测试——围绕题目实际执行网页检索并返回 SAMR 官方公告等具体 URL、区分来源类型、标注待补证。随后完成 P2-03 在线切片：`research run --task-id N --live` 把人工确认的任务书交给 pi，按 JSON 契约写回文章型深度研究稿与逐条“待补证”来源，失败自动回退待启动。RedFox 数据已落两层本地状态（SQLite 归一化文章 + `var/raw/redfox/` 脱敏原始响应），并新增 `knowledge-base export / backfill` 把知识库正文补全并固化版本化快照。
 
 已确认的基本边界：
 
@@ -65,6 +65,8 @@ uv sync --extra dev
 
 # 纵向研究烟雾测试（pi 已登录；真实调用需显式加 --live）：
 .\.venv\Scripts\nutrition-radar.exe research smoke-test-pi --live
+# 启动一个已人工确认的研究任务书，pi 检索公开网页并写回待审稿件：
+.\.venv\Scripts\nutrition-radar.exe research run --task-id 1 --live
 
 # 正式来源配置完成并同步后，启动只监听本机的正式工作台：
 .\.venv\Scripts\nutrition-radar.exe serve --port 8765 --open
@@ -83,6 +85,8 @@ uv sync --extra dev
 已选题的卡片和详情页可直接打开对应的微信公众号文章结构 Demo。该链接只对当前确有匹配样稿的选题显示；卡片本身仍可点击进入完整选题详情。详情页还可由人工生成一份独立研究任务书，编辑研究问题、受众、决策用途、研究范围、地域与时间范围、判断维度、排除项、待补证主张和稿件要求。任务书必须再次人工确认，确认后锁定并进入“待启动”；自动启动默认关闭。
 
 “研究与成稿”标签页默认按“任务书 → 稿件 → 已定稿”显示本期的下游任务；任务详情用“补全并确认、等待人工启动、等待人工审阅”等下一步提示代替细分状态名。确认后的任务只能由操作者手动启动“离线文章 Demo”：系统只用任务书和随任务带入的公众号发现线索生成文章型 V1，页面和正文均标明“未联网检索”。所有发现源继续为“待补证”，不会生成或暗示任何新事实。操作者可退回生成 V2/V3、直接编辑正文并另存新版本；旧稿不会被覆盖。人工确认当前版本时，系统将它保存为数据库同级目录下的 `article-drafts/task-NNNN/article-vNNN-final.md`，并写入审阅说明和来源/证据状态。确认 Markdown 不等于授权发布，也不会触发公众号接口。
+
+同一“待启动”任务也可由操作者用 `nutrition-radar research run --task-id N --live` 启动真实联网研究：pi 按任务书检索公开网页，按 JSON 契约返回文章型深度研究稿，写入正文与逐条来源（URL、发布机构、来源类型），所有来源保持“待补证”直到人工复核；Agent 失败或输出不符合契约时任务回退“待启动”并留痕，不生成伪稿件。
 
 页面顶部现在提供“监测期次”工作区。来源文章在同一数据库中全局去重，但主题、信号、选题及其人工状态按期次隔离；同一时间只允许一个进行中的期次。关闭本期后历史内容只读，才能创建空白下一期。切换历史期次不会混入其他期的看板状态。
 

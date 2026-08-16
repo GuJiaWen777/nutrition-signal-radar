@@ -135,6 +135,7 @@ class PiAgentRunner:
     working_directory: Path | None = None
     environment: Mapping[str, str] | None = None
     system_prompt: str | None = None
+    json_output: bool = False
 
     def run(self, request: PiAgentRequest) -> AgentRunResult:
         command = list(self.pi_command) or ["pi"]
@@ -153,9 +154,15 @@ class PiAgentRunner:
             command.extend(("--provider", self.provider))
         if self.model:
             command.extend(("--model", self.model))
-        if self.system_prompt:
-            command.extend(("--system-prompt", self.system_prompt))
-        command.append(build_pi_research_prompt(request))
+        system_prompt = self.system_prompt or build_pi_system_prompt(
+            json_output=self.json_output
+        )
+        command.extend(("--system-prompt", system_prompt))
+        command.append(
+            build_pi_research_json_prompt(request)
+            if self.json_output
+            else build_pi_research_prompt(request)
+        )
         environment = dict(os.environ)
         if self.environment:
             environment.update(self.environment)
@@ -243,16 +250,51 @@ def build_pi_research_prompt(request: PiAgentRequest) -> str:
     return "\n".join(sections)
 
 
-def build_pi_system_prompt() -> str:
+def build_pi_system_prompt(*, json_output: bool = False) -> str:
     """Render the evidence contract as the pi system prompt."""
 
-    return (
+    contract = (
         "你是面向营养健康行业决策者的公开互联网研究 Agent。"
         "只检索无需登录的公开网页；每条重要事实必须落到具体页面 URL；"
         "找不到可靠来源就明确写“不确定”，绝不编造 URL。"
         "区分来源类型（监管原文、官方公告、论文、企业公告、权威媒体等）；"
         "公众号与媒体内容只是发现线索，监管、功效、科研与市场数据的主张必须回到一手来源，"
         "否则标记“待补证”。不要修改任何文件，只输出最终研究草稿。"
+    )
+    if json_output:
+        contract += (
+            "最终回复必须是单个合法 JSON 对象，不得使用 Markdown 代码围栏，"
+            "不得附加任何解释文字；字段结构严格按用户消息中的示例。"
+            "sources 必须包含实际检索到的具体 URL。"
+        )
+    return contract
+
+
+def build_pi_research_json_prompt(request: PiAgentRequest) -> str:
+    """Render the task plus the strict JSON output contract."""
+
+    return (
+        build_pi_research_prompt(request)
+        + """
+
+只输出一个 JSON 对象，结构如下：
+{
+  "title": "文章标题",
+  "key_judgment": "一段话核心判断",
+  "article_body": "面向行业决策者的 Markdown 正文",
+  "action_implications": "行动启示",
+  "uncertainty_notes": "不确定性与待补证项",
+  "sources": [
+    {
+      "claim": "这条来源支持的事实",
+      "title": "页面标题",
+      "url": "https://具体页面",
+      "publisher": "发布机构",
+      "source_type": "regulator|research_paper|company_announcement|market_data|media|other"
+    }
+  ]
+}
+找不到可靠来源的字段写“待补证”，绝不编造 URL。"""
     )
 
 

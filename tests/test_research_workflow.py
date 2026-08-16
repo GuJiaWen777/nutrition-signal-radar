@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from nutrition_signal_radar.agent_gateway import AgentRunResult, AgentToolCall
 from nutrition_signal_radar.article_contract import ArticleBatch, NormalizedArticle
 from nutrition_signal_radar.cycle_service import close_monitoring_cycle
 from nutrition_signal_radar.database import connect_database
@@ -15,10 +16,66 @@ from nutrition_signal_radar.research_workflow import (
     get_research_task,
     regenerate_offline_draft_demo,
     run_offline_draft_demo,
+    run_online_research,
     save_draft_revision,
     update_research_task,
 )
 from nutrition_signal_radar.topic_workflow import transition_candidate
+
+
+ONLINE_JSON = """
+{
+  "title": "新版原料目录的影响判断",
+  "key_judgment": "核心判断：目录扩围会改变备案路径。",
+  "article_body": "# 新版原料目录的影响判断\\n\\n面向企业决策者的正文。",
+  "action_implications": "优先核对原料是否入目录，再决定备案节奏。",
+  "uncertainty_notes": "部分公告仍在征求意见，时间窗口待补证。",
+  "sources": [
+    {
+      "claim": "总局发布征求意见稿",
+      "title": "关于征求新版目录意见的公告",
+      "url": "https://www.samr.gov.cn/notice/1",
+      "publisher": "市场监管总局",
+      "source_type": "监管原文"
+    },
+    {
+      "claim": "论文讨论益生菌安全性",
+      "title": "益生菌菌株安全性研究",
+      "url": "https://journal.example/paper/1",
+      "publisher": "示例期刊",
+      "source_type": "论文"
+    }
+  ]
+}
+"""
+
+
+class _FakeOnlineRunner:
+    def __init__(self, result: AgentRunResult) -> None:
+        self.result = result
+        self.requests: list[object] = []
+
+    def run(self, request: object) -> AgentRunResult:
+        self.requests.append(request)
+        return self.result
+
+
+def _successful_online_result() -> AgentRunResult:
+    return AgentRunResult(
+        status="completed",
+        final_text=ONLINE_JSON,
+        tool_calls=(
+            AgentToolCall(
+                tool_name="web_search",
+                arguments={"query": "原料目录"},
+                result='{"urls":["https://www.samr.gov.cn/notice/1"]}',
+                is_error=False,
+            ),
+        ),
+        event_lines=(),
+        exit_code=0,
+        stderr="",
+    )
 
 
 def _prepared_database(tmp_path: Path) -> tuple[Path, int, int]:
@@ -96,6 +153,74 @@ def test_only_a_confirmed_selected_topic_can_create_a_research_task(
     transition_candidate(path, candidate_id, "pending_confirmation")
     with pytest.raises(ResearchWorkflowError, match="只有人工确认"):
         create_research_task(path, candidate_id)
+
+
+def test_online_research_creates_review_draft_with_needs_evidence_sources(
+    tmp_path: Path,
+) -> None:
+    path, candidate_id, _ = _prepared_database(tmp_path)
+    _select_topic(path, candidate_id)
+    task_id = create_research_task(path, candidate_id).task_id
+    confirm_research_task(path, task_id)
+    runner = _FakeOnlineRunner(_successful_online_result())
+
+    mutation = run_online_research(path, task_id, runner)
+    task = get_research_task(path, task_id=task_id)
+
+    assert mutation.draft_id > 0
+    assert mutation.version == 1
+    assert mutation.task_status == "draft_review"
+    assert task is not None
+    assert task["status"] == "draft_review"
+    assert task["can_run_online_research"] is False
+    draft = task["latest_draft"]
+    assert draft is not None
+    assert draft["is_online_research"] is True
+    assert draft["is_offline_demo"] is False
+    assert draft["generated_by"] == "pi_web_access_v1"
+    assert len(draft["sources"]) == 2
+    assert {source["source_type"] for source in draft["sources"]} == {
+        "regulator",
+        "research_paper",
+    }
+    assert all(source["evidence_status"] == "needs_evidence" for source in draft["sources"])
+    event_types = {event["event_type"] for event in task["events"]}
+    assert "online_research_started" in event_types
+    assert "online_research_draft_generated" in event_types
+    assert len(runner.requests) == 1
+    exchange_dir = path.parent / "raw" / "agent"
+    assert exchange_dir.is_dir()
+    assert list(exchange_dir.glob("*-input.json"))
+
+
+def test_online_research_failure_reverts_task_without_a_draft(tmp_path: Path) -> None:
+    path, candidate_id, _ = _prepared_database(tmp_path)
+    _select_topic(path, candidate_id)
+    task_id = create_research_task(path, candidate_id).task_id
+    confirm_research_task(path, task_id)
+    failed = AgentRunResult(
+        status="failed",
+        final_text="",
+        tool_calls=(),
+        event_lines=(),
+        exit_code=1,
+        stderr="provider temporarily unavailable",
+    )
+    runner = _FakeOnlineRunner(failed)
+
+    mutation = run_online_research(path, task_id, runner)
+    task = get_research_task(path, task_id=task_id)
+
+    assert mutation.draft_id == 0
+    assert mutation.task_status == "pending_start"
+    assert task is not None
+    assert task["status"] == "pending_start"
+    assert task["drafts"] == []
+    assert any(event["event_type"] == "online_research_failed" for event in task["events"])
+    assert any(
+        "provider temporarily unavailable" == (event["reason"] or "")
+        for event in task["events"]
+    )
 
 
 def test_confirmed_topic_creates_one_editable_prefilled_task(

@@ -7,11 +7,13 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
+from .agent_gateway import AgentRunResult, PiAgentRequest, save_agent_exchange
 from .database import connect_database, transaction
 from .schema import initialize_schema
+from .source_registry import list_priority_sites
 
 
 SQL_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
@@ -65,6 +67,11 @@ MAX_DRAFT_FIELD_LENGTHS = {
 }
 
 OFFLINE_DEMO_GENERATOR = "offline_article_demo_v1"
+ONLINE_RESEARCH_GENERATOR = "pi_web_access_v1"
+
+
+class OnlineResearchRunner(Protocol):
+    def run(self, request: PiAgentRequest) -> AgentRunResult: ...
 
 
 class ResearchWorkflowError(ValueError):
@@ -459,6 +466,154 @@ def run_offline_draft_demo(
         connection.close()
 
 
+def run_online_research(
+    database_path: Path,
+    task_id: int,
+    runner: OnlineResearchRunner,
+    *,
+    actor: str = "operator",
+) -> ResearchDraftMutationResult:
+    """Run the confirmed task through the public-web pi research Agent.
+
+    The human gate stays intact: only a confirmed ``pending_start`` task can
+    be started, the task is marked ``researching`` while the external call is
+    in flight, and a failed or non-JSON result reverts it to ``pending_start``
+    with an audit event instead of inventing a draft.
+    """
+
+    initialize_schema(database_path)
+    connection = connect_database(database_path)
+    try:
+        with transaction(connection):
+            task = _task_row(connection, task_id=task_id)
+            if task is None:
+                raise ResearchWorkflowError(f"研究任务 {task_id} 不存在")
+            if task["status"] != "pending_start":
+                raise ResearchWorkflowError("只有已人工确认、待启动的任务可以启动联网研究")
+            if task["confirmed_at"] is None:
+                raise ResearchWorkflowError("研究任务书尚未通过人工确认")
+            if _latest_draft_row(connection, task_id) is not None:
+                raise ResearchWorkflowError("该研究任务已有稿件，不能再次创建首版")
+
+            connection.execute(
+                f"""
+                UPDATE research_tasks SET
+                    status = 'researching', start_requested_at = ({SQL_NOW}),
+                    started_at = ({SQL_NOW}), updated_at = ({SQL_NOW})
+                WHERE id = ?
+                """,
+                (task_id,),
+            )
+            _record_event(
+                connection,
+                task_id,
+                "online_research_started",
+                actor=actor,
+                from_status="pending_start",
+                to_status="researching",
+                payload={
+                    "generator": ONLINE_RESEARCH_GENERATOR,
+                    "network_access": True,
+                },
+            )
+    finally:
+        connection.close()
+
+    request = _build_online_research_request(database_path, task)
+    try:
+        result = runner.run(request)
+    except Exception as exc:  # External runner failures must not fake a draft.
+        result = AgentRunResult(
+            status="failed",
+            final_text="",
+            tool_calls=(),
+            event_lines=(),
+            exit_code=-1,
+            stderr=f"{type(exc).__name__}: {exc}"[:2000],
+        )
+    save_agent_exchange(database_path.parent / "raw" / "agent", request, result)
+
+    parsed: dict[str, object] | None = None
+    error: str | None = None
+    if result.status == "completed":
+        try:
+            parsed = _parse_online_research_output(result.final_text)
+        except ResearchWorkflowError as exc:
+            error = str(exc)
+    else:
+        error = result.stderr.strip() or f"研究 Agent 状态异常：{result.status}"
+
+    connection = connect_database(database_path)
+    try:
+        with transaction(connection):
+            if parsed is None:
+                connection.execute(
+                    f"""
+                    UPDATE research_tasks SET
+                        status = 'pending_start', updated_at = ({SQL_NOW})
+                    WHERE id = ?
+                    """,
+                    (task_id,),
+                )
+                _record_event(
+                    connection,
+                    task_id,
+                    "online_research_failed",
+                    actor=actor,
+                    from_status="researching",
+                    to_status="pending_start",
+                    reason=error,
+                    payload={
+                        "generator": ONLINE_RESEARCH_GENERATOR,
+                        "agent_status": result.status,
+                    },
+                )
+                return ResearchDraftMutationResult(
+                    task_id=task_id,
+                    draft_id=0,
+                    version=0,
+                    task_status="pending_start",
+                    draft_status="review",
+                )
+
+            draft_id, version = _insert_online_research_draft(
+                connection, task, parsed, result
+            )
+            connection.execute(
+                f"""
+                UPDATE research_tasks SET
+                    status = 'draft_review', updated_at = ({SQL_NOW})
+                WHERE id = ?
+                """,
+                (task_id,),
+            )
+            _record_event(
+                connection,
+                task_id,
+                "online_research_draft_generated",
+                actor=actor,
+                draft_id=draft_id,
+                from_status="researching",
+                to_status="draft_review",
+                payload={
+                    "generator": ONLINE_RESEARCH_GENERATOR,
+                    "version": version,
+                    "source_count": len(_online_sources(parsed)),
+                    "web_tool_calls": result.web_tool_calls,
+                    "network_access": True,
+                },
+            )
+        return ResearchDraftMutationResult(
+            task_id=task_id,
+            draft_id=draft_id,
+            version=version,
+            task_status="draft_review",
+            draft_status="review",
+        )
+    finally:
+        connection.close()
+
+
 def regenerate_offline_draft_demo(
     database_path: Path,
     task_id: int,
@@ -802,6 +957,7 @@ def get_research_task(
         payload["drafts"] = drafts
         payload["latest_draft"] = drafts[0] if drafts else None
         payload["can_run_offline_demo"] = payload["status"] == "pending_start"
+        payload["can_run_online_research"] = payload["status"] == "pending_start"
         payload["can_finalize"] = bool(
             payload["status"] == "draft_review"
             and payload["latest_draft"]
@@ -970,6 +1126,184 @@ def _insert_discovery_sources_from_task(
         )
 
 
+def _build_online_research_request(
+    database_path: Path,
+    task: sqlite3.Row,
+) -> PiAgentRequest:
+    evidence = _json_list(str(task["known_evidence_json"] or "[]"))
+    known = []
+    for item in evidence:
+        if isinstance(item, Mapping):
+            title = str(item.get("title") or "").strip()
+            reference = str(item.get("url") or "").strip()
+            known.append(f"{title}｜{reference}" if reference else title)
+        else:
+            known.append(str(item or "").strip())
+    enabled_sites = [site for site in list_priority_sites(database_path) if site.enabled]
+    scope_parts = [str(task["scope"] or "").strip()]
+    if str(task["geography"] or "").strip():
+        scope_parts.append(f"地域范围：{str(task['geography']).strip()}")
+    if str(task["exclusions"] or "").strip():
+        scope_parts.append(f"明确排除：{str(task['exclusions']).strip()}")
+    if enabled_sites:
+        scope_parts.append(
+            "优先检索公开网站：" + "、".join(site.domain for site in enabled_sites[:12])
+        )
+    return PiAgentRequest(
+        research_question=str(task["research_question"] or "").strip(),
+        audience=str(task["audience"] or "").strip(),
+        decision_use=str(task["decision_use"] or "").strip(),
+        scope="\n".join(value for value in scope_parts if value),
+        time_range=str(task["time_range"] or "").strip(),
+        known_evidence=tuple(value for value in known if value),
+        evidence_gaps=str(task["evidence_gaps"] or "").strip(),
+        output_requirements=str(task["output_requirements"] or "").strip(),
+    )
+
+
+def _parse_online_research_output(text: str) -> dict[str, object]:
+    cleaned = str(text or "").strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ResearchWorkflowError("研究 Agent 未返回合法 JSON，任务已回退待启动") from exc
+    if not isinstance(parsed, dict):
+        raise ResearchWorkflowError("研究 Agent 返回的不是 JSON 对象")
+    if not str(parsed.get("title") or "").strip():
+        raise ResearchWorkflowError("研究 Agent 返回的 JSON 缺少标题")
+    if not str(parsed.get("article_body") or "").strip():
+        raise ResearchWorkflowError("研究 Agent 返回的 JSON 缺少正文")
+    return parsed
+
+
+def _online_sources(parsed: Mapping[str, object]) -> list[dict[str, str]]:
+    raw = parsed.get("sources") or []
+    if not isinstance(raw, list):
+        return []
+    cleaned: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        url = str(item.get("url") or "").strip()
+        title = str(item.get("title") or "").strip()
+        if not url and not title:
+            continue
+        cleaned.append(
+            {
+                "claim": str(item.get("claim") or "").strip()[:2000] or title,
+                "title": title[:500] or "未命名来源页面",
+                "url": url,
+                "publisher": str(item.get("publisher") or "未命名发布机构").strip()[:200],
+                "source_type": _normalize_source_type(str(item.get("source_type") or "other")),
+            }
+        )
+    return cleaned[:80]
+
+
+def _normalize_source_type(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    mapping = {
+        "regulator": {"regulator", "regulatory", "监管", "监管原文", "官方公告", "政府", "government"},
+        "research_paper": {"research_paper", "paper", "journal", "论文", "学术", "期刊"},
+        "company_announcement": {"company_announcement", "announcement", "企业公告", "公司公告", "信披"},
+        "market_data": {"market_data", "report", "市场数据", "数据报告", "研报"},
+        "media": {"media", "news", "媒体", "新闻", "权威媒体"},
+        "wechat_discovery": {"wechat_discovery", "wechat", "公众号"},
+    }
+    for canonical, aliases in mapping.items():
+        if normalized in aliases:
+            return canonical
+    return "other"
+
+
+def _insert_online_research_draft(
+    connection: sqlite3.Connection,
+    task: sqlite3.Row,
+    parsed: Mapping[str, object],
+    result: AgentRunResult,
+) -> tuple[int, int]:
+    task_id = int(task["id"])
+    sources = _online_sources(parsed)
+    title = _clean_agent_text("title", str(parsed.get("title") or ""))
+    article_body = _clean_agent_text("article_body", str(parsed.get("article_body") or ""))
+    key_judgment = _clean_agent_text(
+        "key_judgment", str(parsed.get("key_judgment") or ""), required=False
+    )
+    action_implications = _clean_agent_text(
+        "action_implications", str(parsed.get("action_implications") or ""), required=False
+    )
+    uncertainty_notes = _clean_agent_text(
+        "uncertainty_notes", str(parsed.get("uncertainty_notes") or ""), required=False
+    )
+    if not uncertainty_notes:
+        uncertainty_notes = "研究 Agent 未单列不确定性；所有来源仍需人工打开具体页面复核后再确认事实。"
+    cursor = connection.execute(
+        f"""
+        INSERT INTO research_drafts(
+            research_task_id, supersedes_draft_id, title, article_body,
+            key_judgment, action_implications, uncertainty_notes, version,
+            revision_reason, change_summary, generated_by, status, generated_at
+        ) VALUES (?, NULL, ?, ?, ?, ?, ?, 1, NULL, ?, ?, 'review', ({SQL_NOW}))
+        """,
+        (
+            task_id,
+            title,
+            article_body,
+            key_judgment,
+            action_implications,
+            uncertainty_notes,
+            (
+                f"公开互联网研究 V1：pi 通过 web_search / fetch_content 执行 "
+                f"{result.web_tool_calls} 次检索并返回 {len(sources)} 条来源；"
+                "所有来源仍为待补证，须人工复核。"
+            ),
+            ONLINE_RESEARCH_GENERATOR,
+        ),
+    )
+    draft_id = int(cursor.lastrowid)
+    for source in sources:
+        connection.execute(
+            f"""
+            INSERT INTO research_sources(
+                draft_id, claim, source_type, source_name, title,
+                url_or_reference, evidence_status, accessed_at, source_note
+            ) VALUES (?, ?, ?, ?, ?, ?, 'needs_evidence', ({SQL_NOW}), ?)
+            """,
+            (
+                draft_id,
+                source["claim"],
+                source["source_type"],
+                source["publisher"],
+                source["title"],
+                source["url"] or "未提供具体 URL",
+                "由 pi 研究 Agent 返回；仍需人工打开具体页面复核事实，不得自动视为已核实。",
+            ),
+        )
+    return draft_id, 1
+
+
+def _clean_agent_text(field: str, value: str, *, required: bool = True) -> str:
+    cleaned = str(value or "").strip()
+    maximum = MAX_DRAFT_FIELD_LENGTHS[field]
+    if required and not cleaned:
+        labels = {
+            "title": "文章标题",
+            "article_body": "文章正文",
+            "key_judgment": "核心判断",
+            "action_implications": "行动启示",
+            "uncertainty_notes": "不确定性说明",
+        }
+        raise ResearchWorkflowError(f"研究 Agent 返回的内容缺少{labels[field]}")
+    return cleaned[:maximum]
+
+
 def _copy_draft_sources(
     connection: sqlite3.Connection, source_draft_id: int, target_draft_id: int
 ) -> None:
@@ -1024,6 +1358,7 @@ def _research_draft_payloads(
             else None
         )
         payload["is_offline_demo"] = payload["generated_by"] == OFFLINE_DEMO_GENERATOR
+        payload["is_online_research"] = payload["generated_by"] == ONLINE_RESEARCH_GENERATOR
         drafts.append(payload)
     return drafts
 

@@ -31,6 +31,7 @@ from .redfox_wide_search import (
     search_redfox_wide_library,
     write_redfox_wide_search_report,
 )
+from .research_workflow import ResearchWorkflowError, run_online_research
 from .schema import initialize_schema, inspect_schema
 from .source_registry import (
     SourceRegistryError,
@@ -395,6 +396,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Non-sensitive smoke-test question (defaults to the P2-02 question).",
     )
     research_smoke.add_argument("--json", action="store_true")
+    research_run = research_commands.add_parser(
+        "run",
+        help="Start a human-confirmed research task with the pi public-web agent.",
+    )
+    research_run.add_argument(
+        "--task-id",
+        type=int,
+        required=True,
+        help="Research task id that has been confirmed and is waiting to start.",
+    )
+    research_run.add_argument(
+        "--live",
+        action="store_true",
+        help="Required acknowledgement before the pi model and web tools are invoked.",
+    )
+    research_run.add_argument("--json", action="store_true")
 
     serve = commands.add_parser(
         "serve",
@@ -831,6 +848,59 @@ def main(argv: Sequence[str] | None = None) -> int:
             for url in result.web_urls[:10]:
                 print(f"- {url}")
         return 0 if passed else 1
+
+    if args.command == "research" and args.research_command == "run":
+        if not args.live:
+            payload = {
+                "status": "protected",
+                "message": (
+                    "Online research invokes the pi model and public-web tools; "
+                    "rerun with --live to acknowledge."
+                ),
+            }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(payload["message"], file=sys.stderr)
+            return 2
+        runner = PiAgentRunner(
+            pi_command=[settings.pi_command],
+            provider=settings.pi_provider,
+            model=settings.pi_model or None,
+            timeout_seconds=settings.pi_timeout_seconds,
+            json_output=True,
+        )
+        try:
+            mutation = run_online_research(
+                settings.database_path,
+                args.task_id,
+                runner,
+            )
+        except (ResearchWorkflowError, AgentGatewayError, ValueError, OSError) as exc:
+            print(f"Online research failed: {exc}", file=sys.stderr)
+            return 1
+        payload = {
+            "task_id": mutation.task_id,
+            "draft_id": mutation.draft_id,
+            "version": mutation.version,
+            "task_status": mutation.task_status,
+            "draft_status": mutation.draft_status,
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            if mutation.draft_id:
+                print(
+                    f"Online research: task {mutation.task_id} -> draft V{mutation.version} "
+                    f"(id {mutation.draft_id}); status {mutation.task_status}."
+                )
+                print("Sources stay 待补证 until a human reviews the specific pages.")
+            else:
+                print(
+                    f"Online research failed and task {mutation.task_id} returned to "
+                    "pending_start; check the research events."
+                )
+        return 0 if mutation.draft_id else 1
 
     if args.command == "serve":
         if not 1 <= args.port <= 65535:
