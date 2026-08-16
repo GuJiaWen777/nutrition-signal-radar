@@ -33,6 +33,7 @@ from .research_workflow import (
     update_research_task,
 )
 from .schema import initialize_schema
+from .source_registry import list_priority_sites, list_source_accounts
 from .topic_workflow import (
     ALLOWED_TRANSITIONS,
     PACKAGE_FIELD_LABELS,
@@ -62,15 +63,41 @@ def run_demo_server(
     port: int = 8765,
     open_browser: bool = False,
 ) -> None:
+    run_radar_server(
+        database_path,
+        port=port,
+        open_browser=open_browser,
+        workspace_label="Nutrition Signal Radar Demo",
+        workspace_kind="demo",
+        missing_database_hint="run demo import-xlsx and demo build first",
+    )
+
+
+def run_radar_server(
+    database_path: Path,
+    *,
+    port: int = 8765,
+    open_browser: bool = False,
+    workspace_label: str = "Nutrition Signal Radar",
+    workspace_kind: str = "formal",
+    missing_database_hint: str = "run db init, configure sources, and sync first",
+) -> None:
+    """Serve either the formal or isolated demo workspace on localhost only."""
+
     database = database_path.resolve()
     if not database.is_file():
         raise FileNotFoundError(
-            f"Demo database does not exist: {database}; run demo import-xlsx and demo build first"
+            f"Radar database does not exist: {database}; {missing_database_hint}"
         )
     initialize_schema(database)
-    server = create_demo_server(database, port=port)
+    server = create_demo_server(
+        database,
+        port=port,
+        workspace_label=workspace_label,
+        workspace_kind=workspace_kind,
+    )
     url = f"http://127.0.0.1:{server.server_port}/"
-    print(f"Nutrition Signal Radar Demo: {url}")
+    print(f"{workspace_label}: {url}")
     print("Press Ctrl+C to stop. The server only listens on 127.0.0.1.")
     if open_browser:
         webbrowser.open(url)
@@ -82,16 +109,36 @@ def run_demo_server(
         server.server_close()
 
 
-def create_demo_server(database_path: Path, *, port: int = 0) -> ThreadingHTTPServer:
+def create_demo_server(
+    database_path: Path,
+    *,
+    port: int = 0,
+    workspace_label: str = "Nutrition Signal Radar Demo",
+    workspace_kind: str = "demo",
+) -> ThreadingHTTPServer:
     database = database_path.resolve()
     initialize_schema(database)
-    handler = _handler_for(database)
+    handler = _handler_for(
+        database,
+        workspace_label=workspace_label,
+        workspace_kind=workspace_kind,
+    )
     return ThreadingHTTPServer(("127.0.0.1", port), handler)
 
 
-def _handler_for(database_path: Path) -> type[BaseHTTPRequestHandler]:
+def _handler_for(
+    database_path: Path,
+    *,
+    workspace_label: str,
+    workspace_kind: str,
+) -> type[BaseHTTPRequestHandler]:
+    handler_workspace_label = workspace_label
+    handler_workspace_kind = workspace_kind
+
     class DemoHandler(BaseHTTPRequestHandler):
         server_version = "NutritionRadarDemo/0.1"
+        workspace_label = handler_workspace_label
+        workspace_kind = handler_workspace_kind
 
         def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
@@ -101,15 +148,34 @@ def _handler_for(database_path: Path) -> type[BaseHTTPRequestHandler]:
                 self._send_bytes((STATIC_DIR / filename).read_bytes(), content_type)
                 return
             if path == "/api/health":
-                self._send_json({"status": "ok", "database_path": str(database_path)})
+                self._send_json(
+                    {
+                        "status": "ok",
+                        "database_path": str(database_path),
+                        "workspace_label": self.workspace_label,
+                        "workspace_kind": self.workspace_kind,
+                    }
+                )
                 return
             if path == "/api/dashboard":
                 cycle_slug = parse_qs(parsed.query).get("cycle", [None])[0]
-                self._send_json(_dashboard_payload(database_path, cycle_slug=cycle_slug))
+                self._send_json(
+                    _dashboard_payload(
+                        database_path,
+                        cycle_slug=cycle_slug,
+                        workspace_label=self.workspace_label,
+                        workspace_kind=self.workspace_kind,
+                    )
+                )
                 return
             if path == "/api/research-tasks":
                 cycle_slug = parse_qs(parsed.query).get("cycle", [None])[0]
-                dashboard = _dashboard_payload(database_path, cycle_slug=cycle_slug)
+                dashboard = _dashboard_payload(
+                    database_path,
+                    cycle_slug=cycle_slug,
+                    workspace_label=self.workspace_label,
+                    workspace_kind=self.workspace_kind,
+                )
                 self._send_json({"research_tasks": dashboard["research_tasks"]})
                 return
             match = re.fullmatch(r"/api/candidates/(\d+)", path)
@@ -460,7 +526,11 @@ def _handler_for(database_path: Path) -> type[BaseHTTPRequestHandler]:
 
 
 def _dashboard_payload(
-    database_path: Path, *, cycle_slug: str | None = None
+    database_path: Path,
+    *,
+    cycle_slug: str | None = None,
+    workspace_label: str = "Nutrition Signal Radar Demo",
+    workspace_kind: str = "demo",
 ) -> dict[str, Any]:
     cycles = list_monitoring_cycles(database_path)
     for cycle in cycles:
@@ -470,6 +540,25 @@ def _dashboard_payload(
             if relative_path
             else None
         )
+
+    registry_accounts = [
+        account.as_dict() for account in list_source_accounts(database_path)
+    ]
+    priority_sites = [site.as_dict() for site in list_priority_sites(database_path)]
+    source_registry = {
+        "accounts": registry_accounts,
+        "priority_sites": priority_sites,
+        "priority_site_enabled_count": sum(
+            bool(site["enabled"]) for site in priority_sites
+        ),
+    }
+    workspace_notice = (
+        "当前看板只用于验证主题聚合、选题筛选与人工审核；"
+        "公众号材料仅作为线索，事实性主张仍需补充一手来源。"
+        if workspace_kind == "demo"
+        else "来源文章仅作发现线索；行业信号与选题由规则生成并等待人工确认，"
+        "事实性主张须回到一手来源补证。"
+    )
 
     connection = connect_database(database_path, readonly=True)
     try:
@@ -484,10 +573,12 @@ def _dashboard_payload(
             return {
                 "demo": {
                     "label": "尚无监测期次",
-                    "notice": "请先导入数据或新建监测期次。",
+                    "notice": workspace_notice,
                     "first_published_at": None,
                     "last_published_at": None,
                     "generator": DEMO_GENERATOR,
+                    "workspace_label": workspace_label,
+                    "workspace_kind": workspace_kind,
                 },
                 "active_cycle": None,
                 "cycles": cycles,
@@ -498,6 +589,7 @@ def _dashboard_payload(
                 "candidates": [],
                 "signals": [],
                 "sources": [],
+                "source_registry": source_registry,
                 "research_tasks": [],
             }
 
@@ -699,13 +791,12 @@ def _dashboard_payload(
         return {
             "demo": {
                 "label": str(active_cycle.get("label") or active_cycle.get("slug")),
-                "notice": (
-                    "当前看板只用于验证主题聚合、选题筛选与人工审核；"
-                    "公众号材料仅作为线索，事实性主张仍需补充一手来源。"
-                ),
+                "notice": workspace_notice,
                 "first_published_at": date_row["first_at"],
                 "last_published_at": date_row["last_at"],
                 "generator": DEMO_GENERATOR,
+                "workspace_label": workspace_label,
+                "workspace_kind": workspace_kind,
             },
             "active_cycle": active_cycle,
             "cycles": cycles,
@@ -716,6 +807,7 @@ def _dashboard_payload(
             "candidates": candidates,
             "signals": signals,
             "sources": sources,
+            "source_registry": source_registry,
             "research_tasks": research_tasks,
         }
     finally:

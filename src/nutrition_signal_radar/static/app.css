@@ -225,6 +225,8 @@ th, td { padding: 14px 18px; text-align: left; border-bottom: 1px solid var(--li
 th { color: var(--muted); background: #f8faf9; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
 td { font-size: 13px; }
 tbody tr:last-child td { border-bottom: 0; }
+.table-note { margin: 0; padding: 12px 20px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.empty-cell { padding: 22px 18px; color: var(--muted); text-align: center; font-size: 12px; }
 
 .detail-dialog { width: min(920px, calc(100vw - 30px)); max-height: calc(100vh - 34px); padding: 0; border: 0; border-radius: 20px; box-shadow: 0 30px 90px rgba(10,35,31,.28); }
 .detail-dialog::backdrop { background: rgba(12,34,31,.62); backdrop-filter: blur(3px); }

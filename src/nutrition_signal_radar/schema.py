@@ -596,6 +596,52 @@ ARTICLE_DRAFT_SCHEMA = Migration(
 )
 
 
+SOURCE_SYNC_AND_WEEKLY_BRIEF_SCHEMA = Migration(
+    version=8,
+    name="source_registry_sync_and_weekly_signal_briefs",
+    statements=(
+        "ALTER TABLE source_accounts ADD COLUMN redfox_account TEXT",
+        """
+        ALTER TABLE source_accounts ADD COLUMN redfox_library TEXT NOT NULL DEFAULT 'quality'
+        CHECK (redfox_library IN ('quality', 'wide'))
+        """,
+        f"""
+        CREATE TABLE source_registry_events (
+            id INTEGER PRIMARY KEY,
+            entity_kind TEXT NOT NULL CHECK (entity_kind IN ('account', 'priority_site')),
+            entity_id INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT,
+            payload_json TEXT NOT NULL DEFAULT '{{}}',
+            created_at TEXT NOT NULL DEFAULT ({UTC_NOW})
+        )
+        """,
+        """
+        CREATE INDEX ix_source_registry_events_entity
+        ON source_registry_events(entity_kind, entity_id, id DESC)
+        """,
+        f"""
+        CREATE TABLE weekly_signal_briefs (
+            id INTEGER PRIMARY KEY,
+            cycle_id INTEGER NOT NULL REFERENCES monitoring_cycles(id) ON DELETE RESTRICT,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            relative_path TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL,
+            file_count INTEGER NOT NULL CHECK (file_count >= 1),
+            generated_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT ({UTC_NOW}),
+            UNIQUE (cycle_id, version)
+        )
+        """,
+        """
+        CREATE INDEX ix_weekly_signal_briefs_cycle_version
+        ON weekly_signal_briefs(cycle_id, version DESC)
+        """,
+    ),
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     INITIAL_SCHEMA,
     DEMO_CLUSTERING_SCHEMA,
@@ -604,6 +650,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     MONITORING_CYCLE_SCHEMA,
     RESEARCH_TASK_SCHEMA,
     ARTICLE_DRAFT_SCHEMA,
+    SOURCE_SYNC_AND_WEEKLY_BRIEF_SCHEMA,
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
 

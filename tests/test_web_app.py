@@ -415,3 +415,39 @@ def test_local_demo_serves_dashboard_detail_and_manual_transition(tmp_path: Path
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_formal_workspace_exposes_source_registry_and_workspace_kind(
+    tmp_path: Path,
+) -> None:
+    path = _database(tmp_path)
+    server = create_demo_server(
+        path,
+        port=0,
+        workspace_label="Nutrition Signal Radar",
+        workspace_kind="formal",
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urlopen(f"{base_url}/api/health", timeout=5) as response:
+            health = json.loads(response.read().decode("utf-8"))
+        with urlopen(f"{base_url}/api/dashboard", timeout=5) as response:
+            dashboard = json.loads(response.read().decode("utf-8"))
+
+        assert health["workspace_kind"] == "formal"
+        assert health["workspace_label"] == "Nutrition Signal Radar"
+        assert dashboard["demo"]["workspace_kind"] == "formal"
+        assert "事实性主张须回到一手来源补证" in dashboard["demo"]["notice"]
+        registry = dashboard["source_registry"]
+        assert registry["priority_site_enabled_count"] == 0
+        assert {account["name"] for account in registry["accounts"]} == {"公众号1", "公众号2"}
+        assert all(
+            set(account) >= {"name", "enabled", "validation_status", "sync_health"}
+            for account in registry["accounts"]
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

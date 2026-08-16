@@ -8,7 +8,7 @@ import sqlite3
 import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -19,6 +19,7 @@ from .schema import initialize_schema
 
 DEMO_GENERATOR = "demo_rules_v3"
 DEMO_GENERATOR_PATTERN = "demo_rules_v%"
+_CST = timezone(timedelta(hours=8), name="Asia/Shanghai")
 TITLE_SIMILARITY_THRESHOLD = 0.54
 SQL_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 
@@ -86,7 +87,7 @@ def build_demo_topics(
     try:
         cycle = get_monitoring_cycle(connection, slug=cycle_slug)
         if cycle is None:
-            raise ValueError("Demo database has no monitoring cycle; import articles first")
+            raise ValueError("Radar database has no monitoring cycle; import articles first")
         if cycle["status"] != "open":
             raise ValueError("Cannot rebuild a closed monitoring cycle")
         cycle_id = int(cycle["id"])
@@ -530,7 +531,7 @@ def _upsert_signal(
     )
     underlying_event = (
         f"多篇文章围绕“{_truncate(_plain_subject(canonical_name), 64)}”形成相似主题。"
-        "这是确定性规则的 Demo 聚类结果，底层事件尚待人工确认。"
+        "这是确定性规则聚类结果，底层事件尚待人工确认。"
     )
     existing = connection.execute(
         "SELECT id FROM industry_signals WHERE cluster_id = ?", (cluster_id,)
@@ -631,7 +632,7 @@ def _upsert_candidate(
     proposed_title = _candidate_title(canonical_name, account_count, independent_count)
     why_now = (
         f"“{cycle_label}”样本中有 {len(members)} 篇文章、{account_count} 个公众号集中讨论；"
-        f"经正文近似去重后估算为 {independent_count} 个相对独立来源。该热度仅代表 Demo 样本。"
+        f"经正文近似去重后估算为 {independent_count} 个相对独立来源。该热度仅代表当前监测样本。"
     )
     angle = (
         "区分传播热度与独立证据，先还原底层事件，再判断其对目标企业的决策影响。"
@@ -954,7 +955,10 @@ def _is_recurring_digest(title: str) -> bool:
 
 
 def _parse_datetime(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_CST)
+    return parsed
 
 
 def _truncate(value: str, length: int) -> str:

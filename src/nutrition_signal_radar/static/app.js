@@ -21,6 +21,14 @@ const TRACK = {
   watch: "传播观察",
 };
 
+const VALIDATION = {
+  pending: "待校验",
+  matched: "已匹配",
+  not_found: "未收录",
+  error: "校验失败",
+  paused: "已暂停",
+};
+
 const TOPIC_DISPLAY_STAGES = [
   {
     key: "judging",
@@ -175,6 +183,11 @@ function renderAll() {
   const { demo } = state.data;
   document.querySelector("#demoLabel").textContent = demo.label;
   document.querySelector("#demoDescription").textContent = demo.notice;
+  const formalWorkspace = demo.workspace_kind === "formal";
+  document.querySelector(".demo-pill").textContent = formalWorkspace
+    ? "LOCAL WORKBENCH"
+    : "LOCAL DEMO";
+  document.title = `营养健康行业信号雷达 · ${formalWorkspace ? "本地工作台" : "Demo"}`;
   renderCycleControls();
   renderStats();
   renderTopSignals();
@@ -456,6 +469,28 @@ function topicCard(candidate) {
 }
 
 function renderSources() {
+  const registry = state.data.source_registry || {};
+  const accounts = registry.accounts || [];
+  document.querySelector("#registryRows").innerHTML = accounts.length
+    ? accounts.map((source) => `
+      <tr>
+        <td>
+          <strong>${escapeHtml(source.name)}</strong>
+          ${source.redfox_name && source.redfox_name !== source.name ? `<small>${escapeHtml(source.redfox_name)}</small>` : ""}
+        </td>
+        <td><span class="badge ${source.enabled ? "teal" : ""}">${source.enabled ? "已启用" : "未启用"}</span></td>
+        <td>${escapeHtml(VALIDATION[source.validation_status] || source.validation_status)}</td>
+        <td>${escapeHtml(source.redfox_library || "quality")}</td>
+        <td>${Number(source.priority)}</td>
+        <td>${escapeHtml(source.sync_health || "—")}${source.last_synced_at ? ` · ${formatDate(source.last_synced_at)}` : ""}</td>
+      </tr>
+    `).join("")
+    : '<tr><td colspan="6" class="empty-cell">尚未配置监测账号；可在 CLI 中用 sources configure-account 建立提案。</td></tr>';
+  const prioritySites = registry.priority_sites || [];
+  document.querySelector("#prioritySiteSummary").textContent = prioritySites.length
+    ? `重点网站清单：${prioritySites.length} 条（已启用 ${registry.priority_site_enabled_count || 0}）；只影响研究检索优先级，不限制公开互联网范围。`
+    : "重点网站清单尚未导入；可在 CLI 中用 sources seed-priority-sites 建立初始草案。";
+
   document.querySelector("#sourceRows").innerHTML = state.data.sources.map((source) => `
     <tr>
       <td><strong>${escapeHtml(source.name)}</strong></td>

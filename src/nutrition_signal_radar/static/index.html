@@ -156,11 +156,20 @@
       <div class="section-heading">
         <div>
           <span class="eyebrow">SOURCE COVERAGE</span>
-          <h2>Demo 来源</h2>
+          <h2>来源</h2>
         </div>
-        <p>这里只展示工作簿中的来源；正式营养健康监测名单将在 RedFox 接入后独立维护。</p>
+        <p>工作簿导入的 Demo 账号与正式监测名单统一展示；正式账号必须通过 RedFox 精确名称校验并经人工启用，未启用前不会发起抓取。重点网站只是研究优先级，不是互联网白名单。</p>
       </div>
       <div class="surface table-wrap">
+        <div class="surface-title"><span>监测名单与启用门禁</span><span class="muted">只有 matched 且人工启用的账号才会被抓取</span></div>
+        <table>
+          <thead><tr><th>公众号</th><th>启用</th><th>校验</th><th>库</th><th>优先级</th><th>健康</th></tr></thead>
+          <tbody id="registryRows"></tbody>
+        </table>
+        <p class="table-note" id="prioritySiteSummary"></p>
+      </div>
+      <div class="surface table-wrap">
+        <div class="surface-title"><span>期内文章覆盖</span><span class="muted">按当期归属文章统计</span></div>
         <table>
           <thead><tr><th>公众号</th><th>文章</th><th>时间范围</th><th>数据状态</th></tr></thead>
           <tbody id="sourceRows"></tbody>
