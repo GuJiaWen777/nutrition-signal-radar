@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -533,7 +534,7 @@ def generate_weekly_article(
             _render_weekly_article_markdown(parsed),
         )
         created_files.append(markdown_path)
-        sources = _weekly_article_sources(parsed)
+        sources = [dict(item) for item in (parsed.get("sources") or [])]
         manifest = {
             "brief_kind": "weekly_industry_article",
             "brief_version": 1,
@@ -1038,8 +1039,8 @@ def _build_weekly_article_request(
     counts = snapshot["counts"]
     return PiAgentRequest(
         research_question=(
-            "把本期行业信号与公开来源证据，写成一份可直接发布到微信公众号的"
-            "《营养保健行业周报》。"
+            "把本期监测窗口内的行业信号与公开来源证据，写成一份可直接发布到"
+            "微信公众号的《营养保健行业周报》。"
         ),
         audience="营养健康行业品牌方、原料商、渠道及企业决策者，同时兼顾普通行业读者",
         decision_use="作为独立的微信公众号文章对外发布；读者据此掌握本期行业关键动向与判断。",
@@ -1048,8 +1049,9 @@ def _build_weekly_article_request(
             "可使用公开网页检索核实关键事实与数据，但不得偏离本期信号主题。"
         ),
         time_range=(
-            f"重点覆盖 {_date(cycle['start_date'])} 至 {_date(cycle['end_date'])} "
-            "期间发生的事件；涉及背景时可合理回溯。"
+            f"正文只写 {_date(cycle['start_date'])} 至 {_date(cycle['end_date'])} "
+            "这个窗口内发生的新事件；窗口内没有新进展的信号直接省略，"
+            "不得用更早的监管、市场、科研或企业事件填充正文。"
         ),
         known_evidence=tuple(known_evidence),
         evidence_gaps=(
@@ -1072,9 +1074,13 @@ def build_weekly_article_prompt(request: PiAgentRequest) -> str:
     """Render the weekly-article task plus its strict JSON output contract."""
 
     known = "\n".join(f"- {item}" for item in request.known_evidence) or "（无）"
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
     sections = [
         "立即执行以下周报文章写作任务。先用 web_search 与 fetch_content 核实关键事实，"
         "不要读取本地文件、不要自我介绍、不要请求补充信息。",
+        "",
+        f"今天的日期是 {today}（北京时间）。请以这个日期判断“本期”和“最近一周”，"
+        "不要写早于本期监测窗口的事件。",
         "",
         f"核心任务：{request.research_question or '（未提供）'}",
         f"目标读者：{request.audience}",
@@ -1095,6 +1101,12 @@ def build_weekly_article_prompt(request: PiAgentRequest) -> str:
         "不超过 4 个，能概括本期最值得关注的动向；",
         "4. 正文约 1800—2800 字，按主题分节；小节标题风格为“一、资本市场”等；",
         "5. 正文末尾可附“市场表现与资本动向”等快讯式小结，也可以直接结束，不写来源清单。",
+        "6. 必须严格按照下方 JSON 示例输出：字段名只能是 title、summary、article_body、"
+        "editor_notes、sources，不得改用 sections、report_type、coverage、"
+        "editorial_summary、methodology 等其他字段名。",
+        "7. title 必须精确采用「营养保健行业周报|主题词1、主题词2」格式，"
+        "主题词用顿号连接、2—4 个；正文必须以“已知信号证据”中的本期信号为主线，"
+        "公开检索只用于补充与核实这些信号。",
     ]
     prompt = "\n".join(sections)
     prompt += """
@@ -1135,22 +1147,190 @@ def _parse_weekly_article_output(text: str) -> dict[str, object]:
         raise WeeklyArticleError("研究 Agent 未返回合法 JSON，文章未生成") from exc
     if not isinstance(parsed, dict):
         raise WeeklyArticleError("研究 Agent 返回的不是 JSON 对象，文章未生成")
-    title = _text(parsed.get("title"))
-    body = str(parsed.get("article_body") or "").strip()
+    return _normalize_weekly_article_payload(parsed)
+
+
+def _normalize_weekly_article_payload(
+    parsed: Mapping[str, object],
+) -> dict[str, object]:
+    title = _article_title_from(parsed)
     if not title:
-        raise WeeklyArticleError("研究 Agent 返回的 JSON 缺少标题")
+        raise WeeklyArticleError("研究 Agent 返回的 JSON 缺少可发布的文章标题")
+    body, dropped_note = _article_body_from(parsed)
     if not body:
         raise WeeklyArticleError("研究 Agent 返回的 JSON 缺少正文")
-    if not (title.startswith("营养") and "行业周报" in title):
-        raise WeeklyArticleError(
-            "文章标题不符合参考文体：应使用「营养保健行业周报|主题词1、主题词2」"
-        )
     forbidden = _forbidden_markers(title, body)
     if forbidden:
         raise WeeklyArticleError(
             "生成内容仍包含不可发布的内部标记：" + "、".join(sorted(forbidden))
         )
-    return parsed
+    notes = _text(parsed.get("editor_notes")) or _text(parsed.get("methodology"))
+    if dropped_note:
+        notes = "\n".join(value for value in (notes, dropped_note) if value)
+    return {
+        "title": title,
+        "summary": _text(parsed.get("summary") or parsed.get("editorial_summary")),
+        "article_body": body,
+        "editor_notes": notes,
+        "sources": _weekly_article_sources(parsed),
+    }
+
+
+def _article_title_from(parsed: Mapping[str, object]) -> str:
+    candidate = _text(parsed.get("title")).strip("《》").strip()
+    if re.fullmatch(r"营养(保健|健康)行业周报[|｜].+", candidate):
+        return candidate
+    themes = _theme_words_from_signals(parsed) or _theme_words_from_sections(parsed)
+    if themes:
+        return "营养保健行业周报|" + "、".join(themes[:3])
+    return ""
+
+
+def _theme_words_from_signals(parsed: Mapping[str, object]) -> list[str]:
+    signals = parsed.get("signals_summary")
+    if not isinstance(signals, list):
+        return []
+    themes: list[str] = []
+    for signal in signals:
+        word = (
+            _text(signal.get("signal") or signal.get("title"))
+            if isinstance(signal, Mapping)
+            else _text(signal)
+        )
+        word = re.sub(r"[（(].*?[）)]", "", word).strip(" 　,，、|｜·")
+        if word and word not in themes:
+            themes.append(word)
+        if len(themes) >= 3:
+            break
+    return themes
+
+
+def _theme_words_from_sections(parsed: Mapping[str, object]) -> list[str]:
+    themes: list[str] = []
+    for section in parsed.get("sections") or []:
+        if not isinstance(section, Mapping):
+            continue
+        heading = _first_key(section, ("section_title", "section", "title", "heading"))
+        heading = re.sub(r"^[一二三四五六七八九十百]+[、.．]\s*", "", heading)
+        heading = re.sub(r"[（(].*?[）)]", "", heading)
+        heading = re.sub(r"(信号|动态|观察清单|观察|清单|周报)$", "", heading)
+        heading = heading.strip(" 　,，、|｜·")
+        if heading and heading not in themes:
+            themes.append(heading)
+        if len(themes) >= 3:
+            break
+    return themes
+
+
+def _article_body_from(
+    parsed: Mapping[str, object],
+) -> tuple[str, str]:
+    raw = str(parsed.get("article_body") or "").strip()
+    if raw:
+        if _forbidden_markers(raw):
+            raise WeeklyArticleError(
+                "研究 Agent 返回的正文包含不可发布的内部标记："
+                + "、".join(sorted(_forbidden_markers(raw)))
+            )
+        return raw, ""
+    sections = parsed.get("sections")
+    if not isinstance(sections, list) or not sections:
+        raise WeeklyArticleError(
+            "研究 Agent 返回的 JSON 缺少正文（既无 article_body 也无 sections）"
+        )
+    lines: list[str] = []
+    dropped: list[str] = []
+    summary = _first_key(
+        parsed, ("executive_summary", "editorial_summary", "summary")
+    )
+    if summary:
+        cleaned, removed = _strip_internal_sentences(summary, "导语")
+        if cleaned:
+            lines.extend([cleaned, ""])
+        dropped.extend(removed)
+    for section in sections:
+        if not isinstance(section, Mapping):
+            continue
+        heading = _first_key(section, ("section_title", "section", "title", "heading"))
+        if not heading:
+            continue
+        lines.extend([f"## {heading}", ""])
+        interpretation = _first_key(
+            section, ("interpretation", "summary", "overview")
+        )
+        if interpretation:
+            cleaned, removed = _strip_internal_sentences(interpretation, heading)
+            if cleaned:
+                lines.extend([cleaned, ""])
+            dropped.extend(removed)
+        for item in section.get("items") or []:
+            if not isinstance(item, Mapping):
+                continue
+            headline = _first_key(item, ("headline", "title", "topic"))
+            content = _first_key(item, ("content", "detail", "body", "text"))
+            if not headline and not content:
+                continue
+            if headline:
+                lines.extend([f"### {headline}", ""])
+            date = _first_key(item, ("date", "published_at"))
+            if date and not _forbidden_markers(date):
+                lines.extend([date, ""])
+            if content:
+                cleaned, removed = _strip_internal_sentences(
+                    content, headline or heading
+                )
+                if cleaned:
+                    lines.extend([cleaned, ""])
+                dropped.extend(removed)
+            impact = _first_key(item, ("impact", "judgment"))
+            if impact:
+                cleaned, removed = _strip_internal_sentences(
+                    impact, headline or heading
+                )
+                if cleaned:
+                    lines.extend([cleaned, ""])
+                dropped.extend(removed)
+    implications = parsed.get("decision_implications")
+    if isinstance(implications, list):
+        implication_lines: list[str] = []
+        for line in implications:
+            text = (
+                _first_key(line, ("detail", "text", "title", "implication"))
+                if isinstance(line, Mapping)
+                else _text(line)
+            )
+            cleaned, removed = _strip_internal_sentences(text, "决策启示")
+            if cleaned:
+                implication_lines.append(f"- {cleaned}")
+            dropped.extend(removed)
+        if implication_lines:
+            lines.extend(["## 决策启示", "", *implication_lines, ""])
+    body = "\n".join(lines).strip()
+    dropped_note = ""
+    if dropped:
+        dropped_note = (
+            "以下内容含未核实表述，已从可发布正文中移除：\n"
+            + "\n".join(f"- {line}" for line in dropped)
+        )
+    return body, dropped_note
+
+
+def _strip_internal_sentences(text: str, label: str = "") -> tuple[str, list[str]]:
+    value = str(text or "").strip()
+    if not _forbidden_markers(value):
+        return value, []
+    parts = re.split(r"(?<=[。！？])", value)
+    kept: list[str] = []
+    removed: list[str] = []
+    for part in parts:
+        if _forbidden_markers(part):
+            removed.append(part.strip())
+        else:
+            kept.append(part)
+    label_prefix = f"「{label}」" if label else ""
+    return "".join(kept).strip(), [
+        f"{label_prefix}{sentence}" for sentence in removed if sentence
+    ]
 
 
 def _forbidden_markers(*texts: object) -> tuple[str, ...]:
@@ -1164,33 +1344,89 @@ def _forbidden_markers(*texts: object) -> tuple[str, ...]:
 
 
 def _weekly_article_sources(parsed: Mapping[str, object]) -> list[dict[str, str]]:
-    raw = parsed.get("sources") or []
-    if not isinstance(raw, list):
-        return []
     cleaned: list[dict[str, str]] = []
-    for item in raw:
-        if not isinstance(item, Mapping):
-            continue
-        url = str(item.get("url") or "").strip()
-        title = str(item.get("title") or "").strip()
-        if not url and not title:
-            continue
+    seen: set[str] = set()
+
+    def add(
+        title: str,
+        url: str,
+        source_type: str,
+        publisher: str = "未命名发布机构",
+    ) -> None:
+        normalized_url = str(url or "").strip()
+        if not normalized_url or normalized_url in seen:
+            return
+        seen.add(normalized_url)
         cleaned.append(
             {
-                "claim": str(item.get("claim") or "").strip()[:2000] or title,
-                "title": title[:500] or "未命名来源页面",
-                "url": url,
-                "publisher": str(item.get("publisher") or "未命名发布机构").strip()[:200],
-                "source_type": _normalize_source_type(str(item.get("source_type") or "other")),
+                "claim": str(title or "").strip()[:2000] or normalized_url,
+                "title": str(title or "").strip()[:500] or "未命名来源页面",
+                "url": normalized_url,
+                "publisher": str(publisher or "未命名发布机构").strip()[:200],
+                "source_type": _normalize_source_type(source_type),
             }
         )
+
+    raw = parsed.get("sources") or []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str):
+                add(item, item, "other")
+            elif isinstance(item, Mapping):
+                url = _first_key(item, ("url", "reference"))
+                title = _first_key(item, ("title", "name"))
+                source_type = _first_key(item, ("source_type", "type")) or "other"
+                add(
+                    title or url,
+                    url,
+                    source_type,
+                    publisher=_first_key(item, ("publisher",)),
+                )
+    if not cleaned:
+        for section in parsed.get("sections") or []:
+            if not isinstance(section, Mapping):
+                continue
+            for item in section.get("items") or []:
+                if not isinstance(item, Mapping):
+                    continue
+                verification = item.get("verification")
+                urls = []
+                if isinstance(verification, Mapping):
+                    verification_urls = verification.get("urls") or []
+                    if isinstance(verification_urls, list):
+                        urls = verification_urls
+                item_sources = item.get("sources")
+                if isinstance(item_sources, list):
+                    urls = item_sources or urls
+                source_type = _first_key(
+                    item, ("source_type",)
+                ) or (
+                    _first_key(verification, ("source_type",))
+                    if isinstance(verification, Mapping)
+                    else "other"
+                )
+                for url in urls:
+                    add(
+                        _first_key(item, ("headline", "title")),
+                        str(url),
+                        source_type,
+                    )
     return cleaned[:80]
 
 
 def _normalize_source_type(value: str) -> str:
-    normalized = str(value or "").strip().lower()
+    cleaned = re.sub(r"[（(].*?[）)]", "", str(value or "").strip())
+    normalized = re.split(r"[+、/|，,]", cleaned)[0].strip().lower()
     mapping = {
-        "regulator": {"regulator", "regulatory", "监管", "监管原文", "官方公告", "政府", "government"},
+        "regulator": {
+            "regulator",
+            "regulatory",
+            "监管",
+            "监管原文",
+            "官方公告",
+            "政府",
+            "government",
+        },
         "research_paper": {"research_paper", "paper", "journal", "论文", "学术", "期刊"},
         "company_announcement": {"company_announcement", "announcement", "企业公告", "公司公告", "信披"},
         "market_data": {"market_data", "report", "市场数据", "数据报告", "研报"},
@@ -1201,6 +1437,16 @@ def _normalize_source_type(value: str) -> str:
         if normalized in aliases:
             return canonical
     return "other"
+
+
+def _first_key(mapping: Mapping[str, object], keys: tuple[str, ...]) -> str:
+    if not isinstance(mapping, Mapping):
+        return ""
+    for key in keys:
+        value = mapping.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
 
 
 def _render_weekly_article_markdown(parsed: Mapping[str, object]) -> str:

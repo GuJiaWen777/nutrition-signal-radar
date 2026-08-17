@@ -282,3 +282,160 @@ def test_weekly_article_can_be_confirmed_and_reopened(tmp_path: Path) -> None:
         assert {"weekly_article_generated", "weekly_article_confirmed", "weekly_article_reopened"} <= events
     finally:
         connection.close()
+
+
+def _sections_payload() -> dict[str, object]:
+    return {
+        "title": "营养健康行业信号周报（面向决策者）",
+        "editorial_summary": "本期聚焦监管与企业资本动向。",
+        "sections": [
+            {
+                "section_title": "一、监管与政策信号",
+                "interpretation": "合规红线持续收紧。",
+                "items": [
+                    {
+                        "headline": "首个保健食品新功能纳入目录",
+                        "date": "2026-07-20",
+                        "content": "市场监管总局发布公告，将骨关节健康新功能纳入目录。",
+                        "verification": {
+                            "status": "已核实",
+                            "source_type": "监管原文",
+                            "urls": ["https://example.com/samr"],
+                        },
+                    },
+                    {
+                        "headline": "网络销售专项整治启动",
+                        "date": "2026-07-22",
+                        "content": "市场监管总局部署网络食品虚假宣传专项整治。相关立案数据待补证。",
+                        "verification": {
+                            "status": "待补证",
+                            "source_type": "官方公告",
+                            "urls": ["https://example.com/notice"],
+                        },
+                    },
+                ],
+            },
+            {
+                "section_title": "二、市场与产业数据信号",
+                "items": [
+                    {
+                        "headline": "线上健康消费增长",
+                        "date": "2026-07-25",
+                        "content": "第三方报告显示线上健康消费双位数增长。",
+                    }
+                ],
+            },
+            {
+                "section_title": "三、企业与资本信号",
+                "items": [
+                    {
+                        "headline": "企业战略升级",
+                        "date": "2026-08-01",
+                        "content": "企业披露战略升级与资本动作。",
+                    }
+                ],
+            },
+        ],
+        "sources": [],
+        "methodology": "事实核查规则：尽可能回到一手来源。",
+    }
+
+
+def test_weekly_article_accepts_section_structured_agent_output(tmp_path: Path) -> None:
+    database_path = _demo_database(tmp_path)
+
+    result = generate_weekly_article(
+        database_path,
+        FakeArticleRunner(payload=_sections_payload()),
+        max_signals=5,
+    )
+
+    assert result.title == "营养保健行业周报|监管与政策、市场与产业数据、企业与资本"
+    markdown = result.markdown_path.read_text(encoding="utf-8")
+    assert markdown.startswith("# 营养保健行业周报|")
+    assert "待补证" not in markdown
+    assert "## 一、监管与政策信号" in markdown
+    assert "专项整治" in markdown
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert "已从可发布正文中移除" in manifest["editor_notes"]
+    urls = {source["url"] for source in manifest["sources"]}
+    assert {"https://example.com/samr", "https://example.com/notice"} <= urls
+    assert manifest["sources"][0]["source_type"] == "regulator"
+
+
+def test_weekly_article_normalizes_alternate_source_shape(tmp_path: Path) -> None:
+    database_path = _demo_database(tmp_path)
+    payload = _article_payload()
+    payload["sources"] = [
+        {
+            "title": "监管总局公告",
+            "url": "https://example.com/regulation",
+            "type": "监管原文",
+        }
+    ]
+
+    result = generate_weekly_article(
+        database_path,
+        FakeArticleRunner(payload=payload),
+        max_signals=5,
+    )
+
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["sources"][0]["source_type"] == "regulator"
+    assert manifest["sources"][0]["url"] == "https://example.com/regulation"
+
+
+def _compact_weekly_payload() -> dict[str, object]:
+    return {
+        "title": "营养健康产业信号周报（2026年第30周）",
+        "executive_summary": "本周监管主线为原料准入精细化。",
+        "signals_summary": [
+            {"signal": "原料准入精细化", "level": "强", "detail": "益生菌申报规定征求意见。"},
+            {"signal": "多肽监管路径不确定", "level": "强", "detail": "FDA 会议建议多组肽列入清单。"},
+        ],
+        "sections": [
+            {
+                "section": "政策监管（中国）",
+                "items": [
+                    {
+                        "headline": "益生菌注册备案新规公开征求意见",
+                        "date": "2026-07-24",
+                        "detail": "市场监管总局就益生菌原料申报规定征求意见，覆盖菌株溯源与活菌检测。",
+                        "impact": "中小代工企业的合规门槛将被抬高。",
+                        "source_type": "权威媒体+行业媒体转载；总局官网原文待补证",
+                        "sources": ["https://example.com/probiotic"],
+                    }
+                ],
+            }
+        ],
+        "decision_implications": [
+            "益生菌企业：8月24日前提交行业意见。",
+            "多肽出口企业：审慎使用膳食补充剂定位。相关事实待补证。",
+        ],
+        "sources": [
+            "https://example.com/probiotic",
+            "https://example.com/fda",
+        ],
+    }
+
+
+def test_weekly_article_handles_compact_agent_schema(tmp_path: Path) -> None:
+    database_path = _demo_database(tmp_path)
+
+    result = generate_weekly_article(
+        database_path,
+        FakeArticleRunner(payload=_compact_weekly_payload()),
+        max_signals=5,
+    )
+
+    assert result.title == "营养保健行业周报|原料准入精细化、多肽监管路径不确定"
+    markdown = result.markdown_path.read_text(encoding="utf-8")
+    assert "待补证" not in markdown
+    assert "## 政策监管（中国）" in markdown
+    assert "益生菌注册备案新规公开征求意见" in markdown
+    assert "## 决策启示" in markdown
+    assert "审慎使用膳食补充剂定位" in markdown
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    urls = {source["url"] for source in manifest["sources"]}
+    assert {"https://example.com/probiotic", "https://example.com/fda"} <= urls
+    assert "已从可发布正文中移除" in manifest["editor_notes"]
