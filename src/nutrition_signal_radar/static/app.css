@@ -228,6 +228,24 @@ tbody tr:last-child td { border-bottom: 0; }
 .table-note { margin: 0; padding: 12px 20px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
 .empty-cell { padding: 22px 18px; color: var(--muted); text-align: center; font-size: 12px; }
 
+.weekly-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 16px; padding: 12px 16px; background: var(--paper); border: 1px solid var(--line); border-radius: 14px; }
+.weekly-meta { color: var(--muted); font-size: 13px; }
+.brief-version-list { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 16px; }
+.brief-version-chip { display: grid; gap: 2px; padding: 8px 12px; border: 1px solid #d4e1dc; border-radius: 10px; background: #fff; color: var(--teal-dark); cursor: pointer; text-align: left; font-weight: 800; }
+.brief-version-chip small { color: var(--muted); font-weight: 500; }
+.brief-version-chip:hover, .brief-version-chip.is-active { border-color: #79aea2; background: var(--teal-soft); }
+.brief-content-wrap { margin-top: 16px; }
+.brief-content { padding: 22px 26px 30px; max-height: 72vh; overflow-y: auto; font-size: 14px; line-height: 1.8; }
+.brief-content h2 { margin: 18px 0 10px; font-size: 20px; }
+.brief-content h3 { margin: 16px 0 8px; font-size: 16px; }
+.brief-content h4 { margin: 14px 0 6px; font-size: 14px; }
+.brief-content p { margin: 8px 0; }
+.brief-content ul { margin: 8px 0 8px 20px; padding: 0; }
+.brief-content li { margin: 4px 0; }
+.brief-content blockquote { margin: 10px 0; padding: 8px 14px; border-left: 3px solid var(--teal); background: var(--teal-soft); color: #40534d; }
+.brief-content a { color: var(--teal-dark); }
+.brief-content hr { margin: 16px 0; border: 0; border-top: 1px solid var(--line); }
+
 .detail-dialog { width: min(920px, calc(100vw - 30px)); max-height: calc(100vh - 34px); padding: 0; border: 0; border-radius: 20px; box-shadow: 0 30px 90px rgba(10,35,31,.28); }
 .detail-dialog::backdrop { background: rgba(12,34,31,.62); backdrop-filter: blur(3px); }
 .dialog-shell { position: relative; }

@@ -85,6 +85,10 @@ def test_static_workspace_groups_detailed_states_into_simple_display_stages() ->
     assert "primaryTopicTransition" in script
     assert '<summary>更多操作</summary>' in script
     assert "值得研究 / 传播观察”只用于筛选" in index
+    assert 'data-tab="weekly"' in index
+    assert 'id="weekly"' in index
+    assert "renderWeeklyBrief" in script
+    assert "exportWeeklyBrief" in script
 
 
 def test_research_task_api_stops_at_human_confirmed_pending_start(
@@ -447,6 +451,55 @@ def test_formal_workspace_exposes_source_registry_and_workspace_kind(
             set(account) >= {"name", "enabled", "validation_status", "sync_health"}
             for account in registry["accounts"]
         )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_weekly_brief_can_be_exported_listed_and_read_from_the_board(
+    tmp_path: Path,
+) -> None:
+    path = _database(tmp_path)
+    server = create_demo_server(path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urlopen(f"{base_url}/api/dashboard", timeout=5) as response:
+            dashboard = json.loads(response.read().decode("utf-8"))
+        cycle_id = int(dashboard["active_cycle"]["id"])
+        with urlopen(
+            f"{base_url}/api/cycles/{cycle_id}/weekly-briefs", timeout=5
+        ) as response:
+            initial = json.loads(response.read().decode("utf-8"))
+        assert initial["briefs"] == []
+
+        export_request = Request(
+            f"{base_url}/api/cycles/{cycle_id}/weekly-briefs",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(export_request, timeout=5) as response:
+            exported = json.loads(response.read().decode("utf-8"))
+            assert response.status == 201
+        assert exported["version"] == 1
+
+        with urlopen(
+            f"{base_url}/api/cycles/{cycle_id}/weekly-briefs", timeout=5
+        ) as response:
+            listed = json.loads(response.read().decode("utf-8"))
+        assert len(listed["briefs"]) == 1
+        assert listed["briefs"][0]["version"] == 1
+
+        with urlopen(
+            f"{base_url}/api/cycles/{cycle_id}/weekly-briefs/1", timeout=5
+        ) as response:
+            read = json.loads(response.read().decode("utf-8"))
+        assert "本周信号快报" in read["markdown"]
+        assert read["exists"] is True
+        assert Path(read["markdown_absolute_path"]).is_file()
     finally:
         server.shutdown()
         server.server_close()

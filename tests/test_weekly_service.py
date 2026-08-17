@@ -6,6 +6,10 @@ from nutrition_signal_radar.database import connect_database
 from nutrition_signal_radar.demo_pipeline import build_demo_topics
 from nutrition_signal_radar.ingest_service import import_article_batch
 from nutrition_signal_radar.weekly_service import export_weekly_signal_brief
+from nutrition_signal_radar.weekly_service import (
+    list_weekly_signal_briefs,
+    read_weekly_signal_brief,
+)
 
 
 def _article(external_id: str, account: str, title: str, url: str) -> NormalizedArticle:
@@ -64,3 +68,37 @@ def test_weekly_signal_brief_is_versioned_and_does_not_start_research(tmp_path: 
         ).fetchone()[0] == 2
     finally:
         connection.close()
+
+
+def test_weekly_signal_briefs_can_be_listed_and_read(tmp_path: Path) -> None:
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    import_article_batch(
+        database_path,
+        ArticleBatch(
+            source_kind="redfox",
+            source_path="https://redfox.hk/example",
+            source_fingerprint="weekly-list-fixture",
+            source_rows=2,
+            articles=(
+                _article("a1", "公众号甲", "益生菌监管政策发布", "https://example.com/a1"),
+                _article("a2", "公众号乙", "益生菌监管政策正式发布", "https://example.com/a2"),
+            ),
+        ),
+    )
+    build_demo_topics(database_path)
+    exported = export_weekly_signal_brief(database_path, max_signals=5)
+
+    briefs = list_weekly_signal_briefs(database_path, cycle_id=exported.cycle_id)
+    assert len(briefs) == 1
+    assert briefs[0]["version"] == 1
+    assert briefs[0]["exists"] is True
+    assert briefs[0]["cycle_slug"] == exported.cycle_slug
+
+    read = read_weekly_signal_brief(
+        database_path, cycle_id=exported.cycle_id, version=1
+    )
+    assert read is not None
+    assert "本周信号快报" in read["markdown"]
+    assert read_weekly_signal_brief(
+        database_path, cycle_id=exported.cycle_id, version=99
+    ) is None

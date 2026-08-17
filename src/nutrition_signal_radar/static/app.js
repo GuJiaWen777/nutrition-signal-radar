@@ -71,6 +71,8 @@ const RESEARCH_DISPLAY_STAGES = [
 const state = {
   data: null,
   activeCycleSlug: null,
+  weeklyBriefs: [],
+  activeBriefVersion: null,
   candidateQuery: "",
   signalQuery: "",
   candidateTrack: "research",
@@ -114,6 +116,7 @@ function bindCycleControls() {
     loadDashboard();
   });
   document.querySelector("#exportCycle").addEventListener("click", exportActiveCycle);
+  document.querySelector("#exportWeeklyBrief").addEventListener("click", exportWeeklyBrief);
   document.querySelector("#closeCycle").addEventListener("click", closeActiveCycle);
   document.querySelector("#newCycle").addEventListener("click", openNewCycleDialog);
   document.querySelector("#cancelCycle").addEventListener("click", () => {
@@ -195,6 +198,7 @@ function renderAll() {
   renderBoard();
   renderResearchTasks();
   renderSources();
+  renderWeeklyBrief();
 }
 
 function renderCycleControls() {
@@ -499,6 +503,145 @@ function renderSources() {
       <td><span class="badge teal">${escapeHtml(source.sync_health === "healthy" ? "已导入" : source.sync_health)}</span></td>
     </tr>
   `).join("");
+}
+
+async function renderWeeklyBrief() {
+  const active = state.data?.active_cycle;
+  const versionList = document.querySelector("#weeklyVersionList");
+  const meta = document.querySelector("#weeklyMeta");
+  if (!active) {
+    versionList.innerHTML = '<div class="empty-column">请先选择一个监测期次。</div>';
+    document.querySelector("#weeklyVersionCount").textContent = "";
+    document.querySelector("#weeklyContent").innerHTML = "";
+    document.querySelector("#weeklyContentMeta").textContent = "";
+    meta.textContent = "尚无期次";
+    return;
+  }
+  meta.textContent = `${active.label} · ${active.status === "open" ? "进行中" : "已关闭"}`;
+  try {
+    const response = await fetch(`/api/cycles/${active.id}/weekly-briefs`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    state.weeklyBriefs = payload.briefs || [];
+  } catch (error) {
+    state.weeklyBriefs = [];
+    showToast(`无法读取本周信号快报：${error.message}`, true);
+  }
+  document.querySelector("#weeklyVersionCount").textContent =
+    state.weeklyBriefs.length
+      ? `${state.weeklyBriefs.length} 个版本`
+      : "尚无版本";
+  versionList.innerHTML = state.weeklyBriefs.length
+    ? state.weeklyBriefs.map((brief) => {
+        const selected = brief.version === state.activeBriefVersion ? " is-active" : "";
+        return `
+          <button class="brief-version-chip${selected}" data-brief-version="${brief.version}">
+            v${String(brief.version).padStart(3, "0")}
+            <small>${formatDate(brief.created_at)} · ${brief.file_count} 个文件</small>
+          </button>
+        `;
+      }).join("")
+    : '<div class="empty-column">本期尚未导出信号快报；点击右上角按钮生成 v001。</div>';
+  versionList.querySelectorAll("[data-brief-version]").forEach((button) => {
+    button.addEventListener("click", () => viewWeeklyBrief(Number(button.dataset.briefVersion)));
+  });
+  if (!state.weeklyBriefs.some((brief) => brief.version === state.activeBriefVersion)) {
+    state.activeBriefVersion = state.weeklyBriefs[0]?.version || null;
+  }
+  if (state.activeBriefVersion) {
+    await viewWeeklyBrief(state.activeBriefVersion);
+  } else {
+    document.querySelector("#weeklyContent").innerHTML =
+      '<div class="empty-column">快报内容将在这里展示。</div>';
+    document.querySelector("#weeklyContentMeta").textContent = "";
+  }
+}
+
+async function viewWeeklyBrief(version) {
+  const active = state.data?.active_cycle;
+  if (!active) return;
+  state.activeBriefVersion = version;
+  document.querySelectorAll("[data-brief-version]").forEach((button) => {
+    button.classList.toggle("is-active", Number(button.dataset.briefVersion) === version);
+  });
+  try {
+    const response = await fetch(`/api/cycles/${active.id}/weekly-briefs/${version}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const brief = await response.json();
+    document.querySelector("#weeklyContentMeta").textContent =
+      `v${String(brief.version).padStart(3, "0")} · ${formatDateTime(brief.created_at)} · 待人工审阅`;
+    document.querySelector("#weeklyContent").innerHTML = brief.markdown
+      ? renderBriefMarkdown(brief.markdown)
+      : '<div class="empty-column">该版本缺少可读内容。</div>';
+  } catch (error) {
+    showToast(`无法打开快报 v${version}：${error.message}`, true);
+  }
+}
+
+async function exportWeeklyBrief() {
+  const active = state.data?.active_cycle;
+  if (!active) {
+    showToast("请先选择一个监测期次", true);
+    return;
+  }
+  const button = document.querySelector("#exportWeeklyBrief");
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/cycles/${active.id}/weekly-briefs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `HTTP ${response.status}`);
+    }
+    showToast(`已导出快报 v${String(payload.version).padStart(3, "0")}，等待人工审阅`);
+    await renderWeeklyBrief();
+  } catch (error) {
+    showToast(`导出失败：${error.message}`, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderBriefMarkdown(markdown) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const html = [];
+  let bulletBuffer = [];
+  const flushBullets = () => {
+    if (bulletBuffer.length) {
+      html.push(`<ul>${bulletBuffer.map((item) => `<li>${inlineMarkdown(item)}</li>`).join("")}</ul>`);
+      bulletBuffer = [];
+    }
+  };
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    if (/^- /.test(line)) {
+      bulletBuffer.push(line.replace(/^- /, ""));
+      continue;
+    }
+    flushBullets();
+    if (/^#{1,4} /.test(line)) {
+      const level = Math.min(line.match(/^#+/)[0].length + 1, 5);
+      html.push(`<h${level}>${inlineMarkdown(line.replace(/^#+\s*/, ""))}</h${level}>`);
+    } else if (/^> /.test(line)) {
+      html.push(`<blockquote>${inlineMarkdown(line.replace(/^>\s*/, ""))}</blockquote>`);
+    } else if (/^---+$/.test(line)) {
+      html.push("<hr>");
+    } else if (line.trim()) {
+      html.push(`<p>${inlineMarkdown(line.trim())}</p>`);
+    }
+  }
+  flushBullets();
+  return html.join("");
+}
+
+function inlineMarkdown(text) {
+  let html = escapeHtml(text);
+  html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  return html;
 }
 
 function renderResearchTasks() {

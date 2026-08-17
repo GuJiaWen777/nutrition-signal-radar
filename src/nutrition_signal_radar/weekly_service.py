@@ -52,6 +52,90 @@ class WeeklySignalBriefResult:
         }
 
 
+def list_weekly_signal_briefs(
+    database_path: Path,
+    *,
+    cycle_id: int | None = None,
+    cycle_slug: str | None = None,
+) -> list[dict[str, object]]:
+    """Return the immutable brief versions for one monitoring cycle."""
+
+    if cycle_id is None and cycle_slug is None:
+        raise ValueError("Provide one of cycle_id or cycle_slug")
+    initialize_schema(database_path)
+    database = Path(database_path).resolve()
+    connection = connect_database(database, readonly=True)
+    try:
+        cycle = get_monitoring_cycle(
+            connection,
+            cycle_id=cycle_id,
+            slug=cycle_slug,
+        )
+        if cycle is None:
+            return []
+        rows = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT id, cycle_id, version, relative_path, manifest_sha256,
+                       file_count, generated_by, created_at
+                FROM weekly_signal_briefs
+                WHERE cycle_id = ?
+                ORDER BY version DESC, id DESC
+                """,
+                (int(cycle["id"]),),
+            )
+        ]
+    finally:
+        connection.close()
+    for row in rows:
+        directory = database.parent / str(row["relative_path"])
+        row["directory_absolute"] = str(directory)
+        markdown = directory / "weekly-signal-brief.md"
+        row["markdown_absolute_path"] = str(markdown)
+        row["exists"] = markdown.is_file()
+        row["cycle_id"] = int(cycle["id"])
+        row["cycle_slug"] = str(cycle["slug"])
+    return rows
+
+
+def read_weekly_signal_brief(
+    database_path: Path,
+    *,
+    cycle_id: int,
+    version: int,
+) -> dict[str, object] | None:
+    """Read one immutable brief version and its markdown content."""
+
+    if version < 1:
+        raise ValueError("brief version must be at least 1")
+    initialize_schema(database_path)
+    database = Path(database_path).resolve()
+    connection = connect_database(database, readonly=True)
+    try:
+        row = connection.execute(
+            """
+            SELECT id, cycle_id, version, relative_path, manifest_sha256,
+                   file_count, generated_by, created_at
+            FROM weekly_signal_briefs
+            WHERE cycle_id = ? AND version = ?
+            """,
+            (cycle_id, version),
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None:
+        return None
+    payload = dict(row)
+    directory = database.parent / str(payload["relative_path"])
+    markdown = directory / "weekly-signal-brief.md"
+    payload["directory_absolute"] = str(directory)
+    payload["markdown_absolute_path"] = str(markdown)
+    payload["exists"] = markdown.is_file()
+    payload["markdown"] = markdown.read_text(encoding="utf-8") if markdown.is_file() else ""
+    return payload
+
+
 def export_weekly_signal_brief(
     database_path: Path,
     *,

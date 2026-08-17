@@ -43,6 +43,7 @@
     <button class="tab is-active" data-tab="overview">总览</button>
     <button class="tab" data-tab="signals">行业信号</button>
     <button class="tab" data-tab="board">选题看板</button>
+    <button class="tab" data-tab="weekly">本周快报</button>
     <button class="tab" data-tab="research">研究与成稿</button>
     <button class="tab" data-tab="sources">来源</button>
   </nav>
@@ -135,6 +136,28 @@
         <summary>已归档 / 不做 <span id="archiveCount"></span></summary>
         <div id="archiveList" class="archive-list"></div>
       </details>
+    </section>
+
+    <section class="panel" id="weekly">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">WEEKLY HORIZONTAL SCAN</span>
+          <h2>本周信号快报</h2>
+        </div>
+        <p>横向扫描草稿：汇总活跃行业信号与公众号发现线索，等待人工审阅。它不改变选题或研究状态，也不属于深度研究。</p>
+      </div>
+      <div class="weekly-toolbar">
+        <div class="weekly-meta" id="weeklyMeta">正在读取…</div>
+        <button class="primary-button" id="exportWeeklyBrief" type="button">导出本周信号快报</button>
+      </div>
+      <div class="surface table-wrap">
+        <div class="surface-title"><span>已有版本</span><span class="muted" id="weeklyVersionCount"></span></div>
+        <div class="brief-version-list" id="weeklyVersionList"></div>
+      </div>
+      <div class="surface brief-content-wrap">
+        <div class="surface-title"><span>快报内容</span><span class="muted" id="weeklyContentMeta"></span></div>
+        <div class="brief-content" id="weeklyContent"></div>
+      </div>
     </section>
 
     <section class="panel" id="research">

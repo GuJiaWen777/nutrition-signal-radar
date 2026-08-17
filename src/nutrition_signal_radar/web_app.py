@@ -44,6 +44,11 @@ from .topic_workflow import (
     update_candidate_editorial_fields,
     update_topic_package,
 )
+from .weekly_service import (
+    export_weekly_signal_brief,
+    list_weekly_signal_briefs,
+    read_weekly_signal_brief,
+)
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -178,6 +183,34 @@ def _handler_for(
                 )
                 self._send_json({"research_tasks": dashboard["research_tasks"]})
                 return
+            brief_match = re.fullmatch(r"/api/cycles/(\d+)/weekly-briefs", path)
+            if brief_match:
+                cycle_id = int(brief_match.group(1))
+                self._send_json(
+                    {
+                        "cycle_id": cycle_id,
+                        "briefs": list_weekly_signal_briefs(
+                            database_path, cycle_id=cycle_id
+                        ),
+                    }
+                )
+                return
+            brief_version_match = re.fullmatch(
+                r"/api/cycles/(\d+)/weekly-briefs/(\d+)", path
+            )
+            if brief_version_match:
+                payload = read_weekly_signal_brief(
+                    database_path,
+                    cycle_id=int(brief_version_match.group(1)),
+                    version=int(brief_version_match.group(2)),
+                )
+                if payload is None:
+                    self._send_json(
+                        {"error": "weekly brief not found"}, HTTPStatus.NOT_FOUND
+                    )
+                else:
+                    self._send_json(payload)
+                return
             match = re.fullmatch(r"/api/candidates/(\d+)", path)
             if match:
                 payload = _candidate_payload(database_path, int(match.group(1)))
@@ -258,10 +291,31 @@ def _handler_for(
                         }
                     self._send_json(payload)
                     return
+                brief_export_match = re.fullmatch(
+                    r"/api/cycles/(\d+)/weekly-briefs", path
+                )
+                if brief_export_match:
+                    cycle_id = int(brief_export_match.group(1))
+                    cycle_connection = connect_database(database_path, readonly=True)
+                    try:
+                        cycle = get_monitoring_cycle(
+                            cycle_connection, cycle_id=cycle_id
+                        )
+                    finally:
+                        cycle_connection.close()
+                    if cycle is None:
+                        raise MonitoringCycleError("监测期次不存在")
+                    brief = export_weekly_signal_brief(
+                        database_path,
+                        cycle_slug=str(cycle["slug"]),
+                        actor="demo_operator",
+                    )
+                    self._send_json(brief.as_dict(), HTTPStatus.CREATED)
+                    return
             except MonitoringCycleError as exc:
                 self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
                 return
-            except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, OSError) as exc:
                 self._send_json({"error": f"invalid request: {exc}"}, HTTPStatus.BAD_REQUEST)
                 return
 
