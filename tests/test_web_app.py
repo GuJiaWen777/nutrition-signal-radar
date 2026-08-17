@@ -3,12 +3,14 @@ import threading
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+from nutrition_signal_radar.agent_gateway import AgentRunResult
 from nutrition_signal_radar.article_contract import ArticleBatch, NormalizedArticle
 from nutrition_signal_radar.database import connect_database
 from nutrition_signal_radar.demo_pipeline import build_demo_topics
 from nutrition_signal_radar.ingest_service import import_article_batch
 from nutrition_signal_radar.topic_workflow import transition_candidate
 from nutrition_signal_radar.web_app import create_demo_server
+from nutrition_signal_radar.weekly_service import generate_weekly_article
 
 
 def _database(tmp_path: Path) -> Path:
@@ -500,6 +502,92 @@ def test_weekly_brief_can_be_exported_listed_and_read_from_the_board(
         assert "本周信号快报" in read["markdown"]
         assert read["exists"] is True
         assert Path(read["markdown_absolute_path"]).is_file()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+class _ArticleRunner:
+    def run(self, request: object) -> AgentRunResult:
+        payload = {
+            "title": "营养保健行业周报|监管趋严、原料创新",
+            "summary": "本期聚焦监管整治与原料创新。",
+            "article_body": (
+                "## 一、监管趋严\n\n7月7日，市场监管总局通报相关案件查办情况。"
+            ),
+            "editor_notes": "尚未核实的数据已从正文移除。",
+            "sources": [
+                {
+                    "claim": "监管总局公布案件数据",
+                    "title": "监管总局发布会实录",
+                    "url": "https://example.com/regulator",
+                    "publisher": "市场监管总局",
+                    "source_type": "regulator",
+                }
+            ],
+        }
+        return AgentRunResult(
+            status="completed",
+            final_text=json.dumps(payload, ensure_ascii=False),
+            tool_calls=(),
+            event_lines=(),
+            exit_code=0,
+            stderr="",
+        )
+
+
+def test_weekly_article_can_be_listed_read_confirmed_and_reopened_from_the_board(
+    tmp_path: Path,
+) -> None:
+    path = _database(tmp_path)
+    article = generate_weekly_article(path, _ArticleRunner())
+    server = create_demo_server(path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urlopen(
+            f"{base_url}/api/cycles/{article.cycle_id}/weekly-articles", timeout=5
+        ) as response:
+            listed = json.loads(response.read().decode("utf-8"))
+        assert len(listed["articles"]) == 1
+        assert listed["articles"][0]["status"] == "draft_for_human_review"
+
+        with urlopen(
+            f"{base_url}/api/cycles/{article.cycle_id}/weekly-articles/1", timeout=5
+        ) as response:
+            read = json.loads(response.read().decode("utf-8"))
+        assert read["title"].startswith("营养保健行业周报")
+        assert "待补证" not in read["markdown"]
+        assert Path(read["markdown_absolute_path"]).is_file()
+
+        confirm_request = Request(
+            f"{base_url}/api/cycles/{article.cycle_id}/weekly-articles/1/confirm",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(confirm_request, timeout=5) as response:
+            confirmed = json.loads(response.read().decode("utf-8"))
+        assert confirmed["status"] == "final"
+
+        with urlopen(
+            f"{base_url}/api/cycles/{article.cycle_id}/weekly-articles/1", timeout=5
+        ) as response:
+            read = json.loads(response.read().decode("utf-8"))
+        assert read["status"] == "final"
+        assert read["confirmed_at"] is not None
+
+        reopen_request = Request(
+            f"{base_url}/api/cycles/{article.cycle_id}/weekly-articles/1/reopen",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(reopen_request, timeout=5) as response:
+            reopened = json.loads(response.read().decode("utf-8"))
+        assert reopened["status"] == "draft_for_human_review"
     finally:
         server.shutdown()
         server.server_close()

@@ -1,8 +1,8 @@
 # 营养健康行业信号雷达实施计划
 
-状态：`Implementation Started — P1 Source Registry / Sync / Weekly Signal Brief Slices Ready; P2 Offline Article-Draft Slice Ready; Independent Repository Migrated`
+状态：`Implementation Started — P1 Source Registry / Sync / Weekly Signal Brief & Publishable Article Slices Ready; P2 Offline/Online Article-Draft Slices Ready; Independent Repository Migrated`
 基线日期：2026-08-15
-代码状态：独立脚手架、配置边界、`doctor`、SQLite schema v8、来源中立文章契约、本地 Excel 导入、规则主题聚合、双审阅队列、可编辑选题包、监测期次隔离、本期选题归档、研究任务书人工门禁及离线文章 Demo 的版本化审阅/本地 Markdown 定稿切片已经完成；RedFox Phase 0 窄适配器和六账号数据可用性验证已完成；P1 来源注册表、人工启用门禁、增量同步、广域库只读搜索与“本周信号快报”横向扫描切片已经实现，真实同步仍待操作者确认启用账号后演练；真实公开网页研究 Agent 后续接入
+代码状态：独立脚手架、配置边界、`doctor`、SQLite schema v9、来源中立文章契约、本地 Excel 导入、规则主题聚合、双审阅队列、可编辑选题包、监测期次隔离、本期选题归档、研究任务书人工门禁及离线/在线文章稿件的版本化审阅/本地 Markdown 定稿切片已经完成；RedFox Phase 0 窄适配器和六账号数据可用性验证已完成；P1 来源注册表、人工启用门禁、增量同步、广域库只读搜索、“本周信号快报”横向扫描与 pi 生成“可发布周报文章”切片已经实现；真实公开网页研究 Agent 已通过 P2-02 烟雾测试并接入 `research run --live` 与 `weekly article generate --live`
 
 ## 1. 实施目标
 
@@ -33,7 +33,7 @@
 | Codex CLI | 已安装，版本 `0.144.5`；ChatGPT 登录态下 `codex exec` 拒绝运行 | 不再作为研究后端；备选为 pi coding-agent（本机 0.84.1，已装 `pi-search-multi`） |
 | `pytest` | 已安装在扩展自己的 `.venv` | 扩展 66 项默认测试通过 |
 | 现有项目测试 | 使用扩展 `.venv` 安装根项目开发依赖后执行 | 现有 24 项测试通过，可作为“不影响现有项目”的回归基线 |
-| SQLite 运行库 | 迁移框架和 schema v8 已实现；项目 `var/radar.sqlite3` 尚未创建 | 来源文章全局去重，主题和选题按监测期次隔离；来源注册、同步审计与周信号快报记录纳入 v8；研究任务、稿件版本和最终 Markdown 拥有独立下游生命周期；需要业务数据时显式运行 `nutrition-radar db init` |
+| SQLite 运行库 | 迁移框架和 schema v9 已实现；正式 `var/radar.sqlite3` 已升级 | 来源文章全局去重，主题和选题按监测期次隔离；来源注册、同步审计、周信号快报与可发布周报文章记录纳入 v8/v9；研究任务、稿件版本和最终 Markdown 拥有独立下游生命周期；需要业务数据时显式运行 `nutrition-radar db init` |
 
 任何密钥只允许通过扩展自己的 `.env` 或进程环境传入，不写入数据库、日志、测试夹具或版本库。
 
@@ -104,7 +104,7 @@ nutrition-signal-radar/
 | `redfox_wide_search.py` | 广域库只读搜索与作者分布报告，用于补录账号发现 | 搜索结论永不自动启用来源 |
 | `source_registry.py` | 公众号监测名单、重点网站清单、人工启用门禁与审计事件 | 默认全部停用；只有 matched 且人工启用的账号才被抓取 |
 | `sync_service.py` | 3 天回看、分页、幂等去重、账号健康 | 单进程执行，不做队列 |
-| `weekly_service.py` | 版本化“本周信号快报”横向扫描草稿 | 只读导出、等待人工审阅；不改变状态、不发布 |
+| `weekly_service.py` | 版本化“本周信号快报”横向扫描草稿与 pi 生成的可发布周报文章 | 快报只读导出；文章正文禁止内部标记、人工确认后发布，不改变研究状态 |
 | `knowledge_base.py` | 本地文章知识库统计与不可覆盖的版本化快照导出 | 只读快照；公众号正文仍标记为待补证发现线索 |
 | `database.py` / `schema.py` | SQLite 连接、迁移、仓储与事件 | 原生 SQL，不引入 ORM |
 | `clustering.py` | 标题、实体和文本相似度聚类，支持人工拆分/合并 | 不引入向量数据库 |
@@ -253,8 +253,8 @@ nutrition-signal-radar/
 #### P1-07 双节奏运行（本周信号快报切片已完成）
 
 - `sync` 负责可由 Windows 任务计划程序每日调用的增量处理；单进程、无守护进程。
-- `nutrition-radar weekly` 现生成版本化“本周信号快报”横向扫描草稿：按辅助分、文章量和时效汇总活跃行业信号并附带公众号发现线索，状态固定为 `draft_for_human_review`，不改变选题/研究状态、不调用模型、不发布。
-- 看板仍可人工导出现有的“本期选题归档”；快报与归档都不是行业周报、深度研究稿或最终文章。
+- `nutrition-radar weekly brief` 生成版本化“本周信号快报”横向扫描草稿：按辅助分、文章量和时效汇总活跃行业信号并附带公众号发现线索，状态固定为 `draft_for_human_review`，不改变选题/研究状态、不调用模型、不发布。
+- 看板仍可人工导出现有的“本期选题归档”；快报与归档都不是可发布周报文章、深度研究稿或最终文章。
 - 强时效规则只把候选标记为“建议待决策”，不绕过人工操作。
 
 切片退出标准：已满足。`test_weekly_service.py` 覆盖连续 `v001/v002` 版本、不可覆盖、审计事件、列表与读取；`test_web_app.py` 覆盖看板导出/列表/读取 API。看板新增独立「本周快报」标签页（与「研究与成稿」分开），展示版本列表与 Markdown 全文，导出按钮由操作者点击触发；真实 Demo（1,677 篇文章、196 个信号）和正式 30 天期次均已生成 v001 快报草稿。
@@ -276,6 +276,16 @@ nutrition-signal-radar/
 - 快照明确把公众号材料标记为 `wechat_discovery / needs_evidence`，只做本地沉淀，不改变证据状态、不发布。
 
 切片退出标准：已满足。`test_knowledge_base.py` 覆盖覆盖率统计、连续版本与只读快照；`test_sync_service.py` 覆盖缺正文回填。真实 30 天演练已把 407 篇正文补全至 100% 并固化为 `var/knowledge-base/export-v002/`。
+
+#### P1-10 可发布周报文章（切片已完成）
+
+- schema v9 新增独立 `weekly_articles` 表与 `exports/weekly-articles/<cycle>/vNNN/` 版本目录；与快报各自从 v001 编号，互不占用版本号。
+- `nutrition-radar weekly article generate --live` 读取当期行业信号快照，让 pi 公开网页 Agent 按《营养保健行业周报》参考文体写作；`weekly-article.md` 是可直接粘贴发布的纯正文。
+- 标题与正文执行硬性发布契约：出现“待补证”“公众号发现线索”“内部状态”“人工审阅”“证据状态”“草稿”“未核实”等内部标记即拒绝入库；不确定性只写入 `manifest.json` 的 `editor_notes` 与 `sources`。
+- 文章停在 `draft_for_human_review`，由操作者 `weekly article confirm --version N` 定稿（写入 `confirmed_at`）或 `reopen` 退回；看板“本周快报”标签内分“信号快报 / 可发布文章”视图。
+- 发布动作仍由人工完成；本仓库不包含微信公众号草稿箱或群发路径，也不自动触发 pi 调用。
+
+切片退出标准：已满足。`test_weekly_service.py`、`test_weekly_article_cli.py` 与 `test_web_app.py` 覆盖文章生成、内部标记拦截、快报/文章独立版本号、确认/重开、CLI 保护与看板 API；全文 102/102 测试通过。
 
 ### Phase 2：0.2 文章型深度研究稿
 

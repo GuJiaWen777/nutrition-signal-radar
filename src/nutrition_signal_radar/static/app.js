@@ -73,6 +73,9 @@ const state = {
   activeCycleSlug: null,
   weeklyBriefs: [],
   activeBriefVersion: null,
+  weeklyArticles: [],
+  activeArticleVersion: null,
+  weeklyKind: "brief",
   candidateQuery: "",
   signalQuery: "",
   candidateTrack: "research",
@@ -126,6 +129,11 @@ function bindCycleControls() {
   document.querySelector("#cycleDialog").addEventListener("click", (event) => {
     if (event.target.id === "cycleDialog") event.target.close();
   });
+  document.querySelectorAll("[data-weekly-kind]").forEach((button) => {
+    button.addEventListener("click", () => setWeeklyKind(button.dataset.weeklyKind));
+  });
+  document.querySelector("#weeklyArticleAction").addEventListener("click", showWeeklyArticleCliHint);
+  document.querySelector("#weeklyArticleConfirm").addEventListener("click", toggleWeeklyArticleStatus);
 }
 
 function bindNavigation() {
@@ -198,7 +206,7 @@ function renderAll() {
   renderBoard();
   renderResearchTasks();
   renderSources();
-  renderWeeklyBrief();
+  renderWeeklyPanel();
 }
 
 function renderCycleControls() {
@@ -509,6 +517,7 @@ async function renderWeeklyBrief() {
   const active = state.data?.active_cycle;
   const versionList = document.querySelector("#weeklyVersionList");
   const meta = document.querySelector("#weeklyMeta");
+  document.querySelector("#weeklyArticleConfirm").hidden = true;
   if (!active) {
     versionList.innerHTML = '<div class="empty-column">请先选择一个监测期次。</div>';
     document.querySelector("#weeklyVersionCount").textContent = "";
@@ -564,6 +573,7 @@ async function viewWeeklyBrief(version) {
   document.querySelectorAll("[data-brief-version]").forEach((button) => {
     button.classList.toggle("is-active", Number(button.dataset.briefVersion) === version);
   });
+  document.querySelector("#weeklyArticleConfirm").hidden = true;
   try {
     const response = await fetch(`/api/cycles/${active.id}/weekly-briefs/${version}`);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -600,6 +610,142 @@ async function exportWeeklyBrief() {
     await renderWeeklyBrief();
   } catch (error) {
     showToast(`导出失败：${error.message}`, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function setWeeklyKind(kind) {
+  state.weeklyKind = kind === "article" ? "article" : "brief";
+  document.querySelectorAll("[data-weekly-kind]").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.weeklyKind === state.weeklyKind);
+  });
+  renderWeeklyPanel();
+}
+
+async function renderWeeklyPanel() {
+  document.querySelector("#weeklyArticleAction").hidden = state.weeklyKind !== "article";
+  document.querySelector("#weeklyArticleConfirm").hidden = true;
+  if (state.weeklyKind === "article") {
+    await renderWeeklyArticle();
+  } else {
+    await renderWeeklyBrief();
+  }
+}
+
+function showWeeklyArticleCliHint() {
+  showToast("请在终端运行：nutrition-radar weekly article generate --live");
+}
+
+async function renderWeeklyArticle() {
+  const active = state.data?.active_cycle;
+  const versionList = document.querySelector("#weeklyVersionList");
+  const meta = document.querySelector("#weeklyMeta");
+  if (!active) {
+    versionList.innerHTML = '<div class="empty-column">请先选择一个监测期次。</div>';
+    document.querySelector("#weeklyVersionCount").textContent = "";
+    document.querySelector("#weeklyContent").innerHTML = "";
+    document.querySelector("#weeklyContentMeta").textContent = "";
+    meta.textContent = "尚无期次";
+    return;
+  }
+  meta.textContent = `${active.label} · 可发布文章`;
+  try {
+    const response = await fetch(`/api/cycles/${active.id}/weekly-articles`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    state.weeklyArticles = payload.articles || [];
+  } catch (error) {
+    state.weeklyArticles = [];
+    showToast(`无法读取可发布文章：${error.message}`, true);
+  }
+  document.querySelector("#weeklyVersionCount").textContent =
+    state.weeklyArticles.length
+      ? `${state.weeklyArticles.length} 个版本`
+      : "尚无版本";
+  versionList.innerHTML = state.weeklyArticles.length
+    ? state.weeklyArticles.map((article) => {
+        const selected = article.version === state.activeArticleVersion ? " is-active" : "";
+        const statusLabel = article.status === "final" ? "已定稿" : "待人工审阅";
+        return `
+          <button class="brief-version-chip${selected}" data-article-version="${article.version}">
+            v${String(article.version).padStart(3, "0")} · ${escapeHtml(article.title)}
+            <small>${statusLabel} · ${formatDate(article.created_at)}</small>
+          </button>
+        `;
+      }).join("")
+    : '<div class="empty-column">本期尚未生成可发布文章；请在 CLI 运行 weekly article generate --live。</div>';
+  versionList.querySelectorAll("[data-article-version]").forEach((button) => {
+    button.addEventListener("click", () => viewWeeklyArticle(Number(button.dataset.articleVersion)));
+  });
+  if (!state.weeklyArticles.some((article) => article.version === state.activeArticleVersion)) {
+    state.activeArticleVersion = state.weeklyArticles[0]?.version || null;
+  }
+  if (state.activeArticleVersion) {
+    await viewWeeklyArticle(state.activeArticleVersion);
+  } else {
+    document.querySelector("#weeklyContent").innerHTML =
+      '<div class="empty-column">文章内容将在这里展示。</div>';
+    document.querySelector("#weeklyContentMeta").textContent = "";
+  }
+}
+
+async function viewWeeklyArticle(version) {
+  const active = state.data?.active_cycle;
+  if (!active) return;
+  state.activeArticleVersion = version;
+  document.querySelectorAll("[data-article-version]").forEach((button) => {
+    button.classList.toggle("is-active", Number(button.dataset.articleVersion) === version);
+  });
+  try {
+    const response = await fetch(`/api/cycles/${active.id}/weekly-articles/${version}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const article = await response.json();
+    const statusLabel = article.status === "final" ? "已定稿" : "待人工审阅";
+    const confirmed = article.confirmed_at ? ` · 确认于 ${formatDateTime(article.confirmed_at)}` : "";
+    document.querySelector("#weeklyContentMeta").textContent =
+      `v${String(article.version).padStart(3, "0")} · ${statusLabel}${confirmed}`;
+    const confirmButton = document.querySelector("#weeklyArticleConfirm");
+    confirmButton.hidden = false;
+    confirmButton.textContent = article.status === "final" ? "回到待编辑" : "确认定稿";
+    document.querySelector("#weeklyContent").innerHTML = article.markdown
+      ? renderBriefMarkdown(article.markdown)
+      : '<div class="empty-column">该版本缺少可读内容。</div>';
+  } catch (error) {
+    showToast(`无法打开文章 v${version}：${error.message}`, true);
+  }
+}
+
+async function toggleWeeklyArticleStatus() {
+  const active = state.data?.active_cycle;
+  if (!active || !state.activeArticleVersion) return;
+  const current = state.weeklyArticles.find(
+    (article) => article.version === state.activeArticleVersion
+  );
+  const operation = current?.status === "final" ? "reopen" : "confirm";
+  const button = document.querySelector("#weeklyArticleConfirm");
+  button.disabled = true;
+  try {
+    const response = await fetch(
+      `/api/cycles/${active.id}/weekly-articles/${state.activeArticleVersion}/${operation}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      }
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `HTTP ${response.status}`);
+    }
+    showToast(
+      operation === "confirm"
+        ? `已确认定稿 v${String(payload.version).padStart(3, "0")}，可复制发布`
+        : `v${String(payload.version).padStart(3, "0")} 已回到待编辑`
+    );
+    await renderWeeklyPanel();
+  } catch (error) {
+    showToast(`状态更新失败：${error.message}`, true);
   } finally {
     button.disabled = false;
   }

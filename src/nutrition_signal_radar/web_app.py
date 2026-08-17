@@ -45,9 +45,14 @@ from .topic_workflow import (
     update_topic_package,
 )
 from .weekly_service import (
+    WeeklyArticleError,
+    confirm_weekly_article,
     export_weekly_signal_brief,
+    list_weekly_articles,
     list_weekly_signal_briefs,
+    read_weekly_article,
     read_weekly_signal_brief,
+    reopen_weekly_article,
 )
 
 
@@ -211,6 +216,34 @@ def _handler_for(
                 else:
                     self._send_json(payload)
                 return
+            article_match = re.fullmatch(r"/api/cycles/(\d+)/weekly-articles", path)
+            if article_match:
+                cycle_id = int(article_match.group(1))
+                self._send_json(
+                    {
+                        "cycle_id": cycle_id,
+                        "articles": list_weekly_articles(
+                            database_path, cycle_id=cycle_id
+                        ),
+                    }
+                )
+                return
+            article_version_match = re.fullmatch(
+                r"/api/cycles/(\d+)/weekly-articles/(\d+)", path
+            )
+            if article_version_match:
+                payload = read_weekly_article(
+                    database_path,
+                    cycle_id=int(article_version_match.group(1)),
+                    version=int(article_version_match.group(2)),
+                )
+                if payload is None:
+                    self._send_json(
+                        {"error": "weekly article not found"}, HTTPStatus.NOT_FOUND
+                    )
+                else:
+                    self._send_json(payload)
+                return
             match = re.fullmatch(r"/api/candidates/(\d+)", path)
             if match:
                 payload = _candidate_payload(database_path, int(match.group(1)))
@@ -312,7 +345,42 @@ def _handler_for(
                     )
                     self._send_json(brief.as_dict(), HTTPStatus.CREATED)
                     return
+                article_mutation_match = re.fullmatch(
+                    r"/api/cycles/(\d+)/weekly-articles/(\d+)/(confirm|reopen)", path
+                )
+                if article_mutation_match:
+                    cycle_id = int(article_mutation_match.group(1))
+                    version = int(article_mutation_match.group(2))
+                    operation = article_mutation_match.group(3)
+                    cycle_connection = connect_database(database_path, readonly=True)
+                    try:
+                        cycle = get_monitoring_cycle(
+                            cycle_connection, cycle_id=cycle_id
+                        )
+                    finally:
+                        cycle_connection.close()
+                    if cycle is None:
+                        raise MonitoringCycleError("监测期次不存在")
+                    if operation == "confirm":
+                        mutation = confirm_weekly_article(
+                            database_path,
+                            cycle_id=cycle_id,
+                            version=version,
+                            actor="demo_operator",
+                        )
+                    else:
+                        mutation = reopen_weekly_article(
+                            database_path,
+                            cycle_id=cycle_id,
+                            version=version,
+                            actor="demo_operator",
+                        )
+                    self._send_json(mutation.as_dict())
+                    return
             except MonitoringCycleError as exc:
+                self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            except WeeklyArticleError as exc:
                 self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
                 return
             except (json.JSONDecodeError, UnicodeDecodeError, ValueError, OSError) as exc:

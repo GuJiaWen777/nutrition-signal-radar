@@ -16,7 +16,8 @@ from .agent_gateway import (
     save_agent_exchange,
 )
 from .config import ConfigError, load_settings
-from .cycle_service import MonitoringCycleError
+from .cycle_service import MonitoringCycleError, get_monitoring_cycle
+from .database import connect_database
 from .demo_pipeline import build_demo_topics
 from .doctor import build_doctor_report, render_doctor_report
 from .ingest_service import import_article_batch
@@ -44,7 +45,17 @@ from .source_registry import (
     set_source_account_enabled,
 )
 from .sync_service import backfill_missing_bodies, sync_enabled_redfox_sources
-from .weekly_service import export_weekly_signal_brief
+from .weekly_service import (
+    WeeklyArticleError,
+    build_weekly_article_prompt,
+    confirm_weekly_article,
+    export_weekly_signal_brief,
+    generate_weekly_article,
+    list_weekly_articles,
+    list_weekly_signal_briefs,
+    read_weekly_article,
+    reopen_weekly_article,
+)
 from .wechat_article_import import import_wechat_article
 from .web_app import run_demo_server, run_radar_server
 from .we_mprss_gateway import (
@@ -324,13 +335,88 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     weekly = commands.add_parser(
         "weekly",
+        help="Create and review weekly signal briefs and publishable weekly articles.",
+    )
+    weekly_commands = weekly.add_subparsers(dest="weekly_command", required=True)
+    weekly_brief = weekly_commands.add_parser(
+        "brief",
         help="Create a versioned local weekly signal-brief draft from existing signals.",
     )
-    weekly.add_argument("--cycle", help="Monitoring-cycle slug (defaults to the current/latest cycle).")
-    weekly.add_argument(
-        "--max-signals", type=int, default=8, help="Number of top signals to include (default: 8)."
+    weekly_brief.add_argument(
+        "--cycle", help="Monitoring-cycle slug (defaults to the current/latest cycle)."
     )
-    weekly.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    weekly_brief.add_argument(
+        "--max-signals",
+        type=int,
+        default=8,
+        help="Number of top signals to include (default: 8).",
+    )
+    weekly_brief.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    weekly_list = weekly_commands.add_parser(
+        "list",
+        help="List weekly signal briefs and weekly articles for one cycle.",
+    )
+    weekly_list.add_argument(
+        "--cycle", help="Monitoring-cycle slug (defaults to the current/latest cycle)."
+    )
+    weekly_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    weekly_article = weekly_commands.add_parser(
+        "article",
+        help="Generate and review publishable weekly industry articles.",
+    )
+    weekly_article_commands = weekly_article.add_subparsers(
+        dest="weekly_article_command", required=True
+    )
+    weekly_article_generate = weekly_article_commands.add_parser(
+        "generate",
+        help=(
+            "Generate one publishable weekly article with the pi public-web agent. "
+            "Requires --live."
+        ),
+    )
+    weekly_article_generate.add_argument(
+        "--cycle", help="Monitoring-cycle slug (defaults to the current/latest cycle)."
+    )
+    weekly_article_generate.add_argument(
+        "--max-signals",
+        type=int,
+        default=8,
+        help="Number of top signals to include (default: 8).",
+    )
+    weekly_article_generate.add_argument(
+        "--live",
+        action="store_true",
+        help="Required acknowledgement before the pi model and web tools are invoked.",
+    )
+    weekly_article_generate.add_argument(
+        "--json", action="store_true", help="Emit machine-readable JSON."
+    )
+    weekly_article_confirm = weekly_article_commands.add_parser(
+        "confirm",
+        help="Mark one generated weekly article as human-confirmed for publication.",
+    )
+    weekly_article_confirm.add_argument(
+        "--cycle", help="Monitoring-cycle slug (defaults to the current/latest cycle)."
+    )
+    weekly_article_confirm.add_argument(
+        "--version", type=int, required=True, help="Article version number (>= 1)."
+    )
+    weekly_article_confirm.add_argument(
+        "--json", action="store_true", help="Emit machine-readable JSON."
+    )
+    weekly_article_reopen = weekly_article_commands.add_parser(
+        "reopen",
+        help="Return a confirmed weekly article to the draft queue.",
+    )
+    weekly_article_reopen.add_argument(
+        "--cycle", help="Monitoring-cycle slug (defaults to the current/latest cycle)."
+    )
+    weekly_article_reopen.add_argument(
+        "--version", type=int, required=True, help="Article version number (>= 1)."
+    )
+    weekly_article_reopen.add_argument(
+        "--json", action="store_true", help="Emit machine-readable JSON."
+    )
 
     knowledge_base = commands.add_parser(
         "knowledge-base",
@@ -680,6 +766,140 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1 if result.failed_sources else 0
 
     if args.command == "weekly":
+        if args.weekly_command == "list":
+            cycle_connection = connect_database(settings.database_path, readonly=True)
+            try:
+                cycle = get_monitoring_cycle(cycle_connection, slug=args.cycle)
+            finally:
+                cycle_connection.close()
+            if cycle is None:
+                payload = {"briefs": [], "articles": [], "cycle_slug": None}
+                if args.json:
+                    print(json.dumps(payload, ensure_ascii=False, indent=2))
+                else:
+                    print("No monitoring cycle found.")
+                return 0
+            briefs = list_weekly_signal_briefs(
+                settings.database_path,
+                cycle_id=int(cycle["id"]),
+            )
+            articles = list_weekly_articles(
+                settings.database_path,
+                cycle_id=int(cycle["id"]),
+            )
+            payload = {
+                "briefs": briefs,
+                "articles": articles,
+                "cycle_slug": str(cycle["slug"]),
+            }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"Weekly signal briefs: {len(briefs)}")
+                for brief in briefs:
+                    print(
+                        f"- v{brief['version']:03d} · {brief['created_at']} · "
+                        f"{brief['file_count']} files"
+                    )
+                print(f"Weekly articles: {len(articles)}")
+                for article in articles:
+                    status = "已定稿" if article["status"] == "final" else "待人工审阅"
+                    print(
+                        f"- v{article['version']:03d} · {article['title']} · {status} · "
+                        f"{article['created_at']}"
+                    )
+            return 0
+        if args.weekly_command == "article" and args.weekly_article_command == "generate":
+            if not args.live:
+                payload = {
+                    "status": "protected",
+                    "message": (
+                        "Weekly article generation invokes the pi model and "
+                        "public-web tools; rerun with --live to acknowledge."
+                    ),
+                }
+                if args.json:
+                    print(json.dumps(payload, ensure_ascii=False, indent=2))
+                else:
+                    print(payload["message"], file=sys.stderr)
+                return 2
+            runner = PiAgentRunner(
+                pi_command=[settings.pi_command],
+                provider=settings.pi_provider,
+                model=settings.pi_model or None,
+                timeout_seconds=settings.pi_timeout_seconds,
+                json_output=True,
+                prompt_builder=build_weekly_article_prompt,
+            )
+            try:
+                result = generate_weekly_article(
+                    settings.database_path,
+                    runner,
+                    cycle_slug=args.cycle,
+                    max_signals=args.max_signals,
+                )
+            except (
+                WeeklyArticleError,
+                AgentGatewayError,
+                MonitoringCycleError,
+                ValueError,
+                OSError,
+            ) as exc:
+                print(f"Weekly article generation failed: {exc}", file=sys.stderr)
+                return 1
+            payload = result.as_dict()
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(
+                    f"Weekly article v{result.version:03d}: {result.title}; "
+                    f"{result.signal_count} signals; draft at {result.markdown_path}"
+                )
+                print(
+                    "The article is publish-ready text but remains draft_for_human_review "
+                    "until you run: weekly article confirm --version "
+                    f"{result.version}"
+                )
+                print("This workbench does not write to or publish on WeChat.")
+            return 0
+        if args.weekly_command == "article":
+            cycle_connection = connect_database(settings.database_path, readonly=True)
+            try:
+                cycle = get_monitoring_cycle(
+                    cycle_connection,
+                    slug=args.cycle,
+                )
+            finally:
+                cycle_connection.close()
+            if cycle is None:
+                print("Weekly article mutation failed: monitoring cycle not found", file=sys.stderr)
+                return 1
+            try:
+                if args.weekly_article_command == "confirm":
+                    mutation = confirm_weekly_article(
+                        settings.database_path,
+                        cycle_id=int(cycle["id"]),
+                        version=args.version,
+                    )
+                else:
+                    mutation = reopen_weekly_article(
+                        settings.database_path,
+                        cycle_id=int(cycle["id"]),
+                        version=args.version,
+                    )
+            except (WeeklyArticleError, ValueError, OSError) as exc:
+                print(f"Weekly article mutation failed: {exc}", file=sys.stderr)
+                return 1
+            payload = mutation.as_dict()
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                label = "已定稿" if payload["status"] == "final" else "回到待编辑"
+                print(
+                    f"Weekly article v{payload['version']:03d}: {label}; "
+                    f"status={payload['status']}"
+                )
+            return 0
         try:
             result = export_weekly_signal_brief(
                 settings.database_path,

@@ -229,6 +229,9 @@ tbody tr:last-child td { border-bottom: 0; }
 .empty-cell { padding: 22px 18px; color: var(--muted); text-align: center; font-size: 12px; }
 
 .weekly-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 16px; padding: 12px 16px; background: var(--paper); border: 1px solid var(--line); border-radius: 14px; }
+.weekly-actions { display: flex; align-items: center; gap: 10px; }
+.weekly-kind-toggle { width: fit-content; margin: 0 0 16px; }
+.weekly-content-actions { display: inline-flex; align-items: center; gap: 12px; }
 .weekly-meta { color: var(--muted); font-size: 13px; }
 .brief-version-list { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 16px; }
 .brief-version-chip { display: grid; gap: 2px; padding: 8px 12px; border: 1px solid #d4e1dc; border-radius: 10px; background: #fff; color: var(--teal-dark); cursor: pointer; text-align: left; font-weight: 800; }

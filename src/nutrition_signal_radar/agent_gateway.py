@@ -17,7 +17,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 
 DEFAULT_PI_PROVIDER = ""
@@ -136,6 +136,7 @@ class PiAgentRunner:
     environment: Mapping[str, str] | None = None
     system_prompt: str | None = None
     json_output: bool = False
+    prompt_builder: Callable[[PiAgentRequest], str] | None = None
 
     def run(self, request: PiAgentRequest) -> AgentRunResult:
         command = list(self.pi_command) or ["pi"]
@@ -158,11 +159,10 @@ class PiAgentRunner:
             json_output=self.json_output
         )
         command.extend(("--system-prompt", system_prompt))
-        command.append(
-            build_pi_research_json_prompt(request)
-            if self.json_output
-            else build_pi_research_prompt(request)
+        builder = self.prompt_builder or (
+            build_pi_research_json_prompt if self.json_output else build_pi_research_prompt
         )
+        command.append(builder(request))
         environment = dict(os.environ)
         if self.environment:
             environment.update(self.environment)

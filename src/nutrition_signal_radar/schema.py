@@ -641,6 +641,37 @@ SOURCE_SYNC_AND_WEEKLY_BRIEF_SCHEMA = Migration(
     ),
 )
 
+WEEKLY_ARTICLE_SCHEMA = Migration(
+    version=9,
+    name="publishable_weekly_articles_and_confirmation",
+    statements=(
+        f"""
+        CREATE TABLE weekly_articles (
+            id INTEGER PRIMARY KEY,
+            cycle_id INTEGER NOT NULL
+                REFERENCES monitoring_cycles(id) ON DELETE RESTRICT,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            title TEXT NOT NULL DEFAULT '',
+            relative_path TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL,
+            file_count INTEGER NOT NULL CHECK (file_count >= 1),
+            generated_by TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft_for_human_review'
+                CHECK (status IN ('draft_for_human_review', 'final')),
+            confirmed_at TEXT,
+            created_at TEXT NOT NULL DEFAULT ({UTC_NOW}),
+            UNIQUE (cycle_id, version),
+            CHECK (status = 'final' OR confirmed_at IS NULL),
+            CHECK (status != 'final' OR confirmed_at IS NOT NULL)
+        )
+        """,
+        """
+        CREATE INDEX ix_weekly_articles_cycle_status_version
+        ON weekly_articles(cycle_id, status, version DESC)
+        """,
+    ),
+)
+
 
 MIGRATIONS: tuple[Migration, ...] = (
     INITIAL_SCHEMA,
@@ -651,6 +682,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     RESEARCH_TASK_SCHEMA,
     ARTICLE_DRAFT_SCHEMA,
     SOURCE_SYNC_AND_WEEKLY_BRIEF_SCHEMA,
+    WEEKLY_ARTICLE_SCHEMA,
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
 

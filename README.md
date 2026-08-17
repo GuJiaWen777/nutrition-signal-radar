@@ -1,16 +1,18 @@
 # 营养健康行业信号雷达
 
-这是“营养健康行业信号雷达”的独立工作区。当前版本完成行业信号审阅、选题判断和选题包确认，提供“已选题 → 可编辑研究任务书 → 人工确认 → 离线文章 Demo → 人工审阅/版本 → 最终本地 Markdown”的交互切片，并可导出等待人工审阅的“本周信号快报”横向扫描草稿；“营养健康行业信号周报”仍是选题与研究完成后的未来可发布产物，不是当前选题归档或快报产物。
+这是“营养健康行业信号雷达”的独立工作区。当前版本完成行业信号审阅、选题判断和选题包确认，提供“已选题 → 可编辑研究任务书 → 人工确认 → 离线文章 Demo → 人工审阅/版本 → 最终本地 Markdown”的交互切片，并可导出等待人工审阅的“本周信号快报”横向扫描草稿；同一期次还可由 pi 生成标题为《营养保健行业周报|主题词》的“可发布周报文章”成品，正文不含“待补证”等内部标记，发布前仍需人工确认。
 
 2026-08-14 起，本项目以独立 Git 仓库维护：`GuJiaWen777/nutrition-signal-radar`。它从历史的 EarlyData 周报实践中派生，但不再是 `SentimentTracker` 仓库中的扩展目录，也不共享代码、运行库、数据库或密钥。原项目只可作为外部 Demo 输入文件的可选位置，不能被本项目写入或修改。
 
-当前状态：需求基线和实施计划已经确认；`F-01` 至 `F-07` 已完成，包括独立脚手架、SQLite 基础、本地 Excel 导入、可操作的选题看板、双审阅队列、可编辑选题包、监测期次隔离和本期选题归档。`P0-01/P0-02` RedFox 窄适配器与六账号受控真实验证已完成：4 个账号获“建议启用”、1 个需修正名称、1 个在优质库未收录；结论不会自动写入来源配置。`P1-01/P1-02` 来源注册表、人工启用门禁、增量同步与账号健康切片已实现；`P1-07` 新增版本化“本周信号快报”横向扫描草稿。`P2-01` 已完成研究任务书人工门禁；schema v8 在稿件、来源和版本记录基础上增加来源注册、同步审计与周信号快报记录，并实现一个必须人工启动的离线文章 Demo。它不调用 DeepSeek、研究 Agent 或微信接口，不能被称为已经完成的联网深度研究。
+当前状态：需求基线和实施计划已经确认；`F-01` 至 `F-07` 已完成，包括独立脚手架、SQLite 基础、本地 Excel 导入、可操作的选题看板、双审阅队列、可编辑选题包、监测期次隔离和本期选题归档。`P0-01/P0-02` RedFox 窄适配器与六账号受控真实验证已完成：4 个账号获“建议启用”、1 个需修正名称、1 个在优质库未收录；结论不会自动写入来源配置。`P1-01/P1-02` 来源注册表、人工启用门禁、增量同步与账号健康切片已实现；`P1-07` 新增版本化“本周信号快报”横向扫描草稿；2026-08-17 新增 schema v9 `weekly_articles` 表与 pi 生成的可发布周报文章切片。`P2-01` 已完成研究任务书人工门禁；schema v8/v9 在稿件、来源和版本记录基础上增加来源注册、同步审计、周信号快报与可发布周报文章记录，并实现一个必须人工启动的离线文章 Demo。它不调用微信接口，也不能自动发布。
 
 行业信号向下游分叉为两条已确认的路径：每周“本周信号快报”做横向扫描、周度输出；另一路经人工确认选题后进入纵向深度研究，形成高价值文章。
 
 2026-08-15 已完成首次真实数据演练：4 个优质库账号加庶正康讯广域库账号共 5 个来源启用。3 天回看同步得到 34 篇文章和 3 张行业信号卡并生成首份正式“本周信号快报”；随后完成 30 天回看同步，共沉淀 407 篇文章，并经 `knowledge-base backfill` 达到 407/407 正文全覆盖。初始 3 天窗口期次已关闭，新开 `cycle-2026-07-17-08-15` 演练期次重建出 254 个主题簇、15 个行业信号，并生成 30 天横向快报。本地知识库已固化不可覆盖快照 `var/knowledge-base/export-v003/`。Bonny营养领航已补录：RedFox 广域库作者名精确为“Bonny营养领航”，但广域关键词搜索无法按账号名枚举其文章，故启用人工链接补录路径（`sources import-article`），操作者提供的益生菌监管修订文章已入库。同日 P2-02 首次烟雾测试显示本机 Codex CLI 在 ChatGPT 登录态下无法执行 `codex exec`，自动研究接入继续停止；研究任务保持“待启动”，离线文章 Demo 仍是唯一稿件生成切片。
 
 同日已把纵向研究后端切换为 pi coding-agent：本机 pi 0.84.1 已登录 deepseek provider，并改装 `npm:pi-web-access`（`web_search` / `fetch_content`，零配置 Exa；`pi-search-multi` 因 Windows 解析错误已卸载）。`agent_gateway.py` 提供程序化调用与 `var/raw/agent/` 审计存档；`research smoke-test-pi --live` 已通过 P2-02 烟雾测试——围绕题目实际执行网页检索并返回 SAMR 官方公告等具体 URL、区分来源类型、标注待补证。随后完成 P2-03 在线切片：`research run --task-id N --live` 把人工确认的任务书交给 pi，按 JSON 契约写回文章型深度研究稿与逐条“待补证”来源，失败自动回退待启动。RedFox 数据已落两层本地状态（SQLite 归一化文章 + `var/raw/redfox/` 脱敏原始响应），并新增 `knowledge-base export / backfill` 把知识库正文补全并固化版本化快照。
+
+2026-08-17 新增“可发布周报文章”切片：schema v9 增加独立 `weekly_articles` 表（与快报各自 v001 起编号），`weekly article generate --live` 让 pi 读取本期信号快照并按两篇参考周报文体写作；标题与正文硬性禁止“待补证”等内部标记，不核实项只写入 `manifest.json` 的 `editor_notes` 与 `sources`。生成后停在 `draft_for_human_review`，由操作者 `confirm` 定稿或 `reopen` 退回；看板“本周快报”标签内分“信号快报 / 可发布文章”两种视图。仍然不包含任何微信公众号写入或群发路径。
 
 已确认的基本边界：
 
@@ -51,8 +53,15 @@ uv sync --extra dev
 .\.venv\Scripts\nutrition-radar.exe sources set-enabled --name "营养健康评论" --enable
 .\.venv\Scripts\nutrition-radar.exe sync --live --lookback-days 3
 
-# 每周横向扫描：生成等待人工审阅的“本周信号快报”草稿，不改状态、不发布：
-.\.venv\Scripts\nutrition-radar.exe weekly
+# 每周横向扫描：生成等待人工审阅的“本周信号快报”草稿：
+.\.venv\Scripts\nutrition-radar.exe weekly brief
+# 查看当期快报与可发布文章版本：
+.\.venv\Scripts\nutrition-radar.exe weekly list
+# 生成可发布周报文章（真实调用 pi 需要 --live；正文禁止内部标记）：
+.\.venv\Scripts\nutrition-radar.exe weekly article generate --live
+# 人工确认定稿 / 回到待编辑（仍由人工复制到公众号，不自动发布）：
+.\.venv\Scripts\nutrition-radar.exe weekly article confirm --version 1
+.\.venv\Scripts\nutrition-radar.exe weekly article reopen --version 1
 
 # 本地知识库：查看文章/正文覆盖并固化不可覆盖的版本化快照：
 .\.venv\Scripts\nutrition-radar.exe knowledge-base stats
@@ -94,15 +103,25 @@ uv sync --extra dev
 
 ### 本周信号快报（横向周度扫描）
 
-`nutrition-radar weekly` 把当期活跃行业信号按候选选题辅助分、文章量和时效排序，生成不可覆盖的版本化 Markdown 草稿：`exports/weekly-signal-briefs/<期次标识>/vNNN/weekly-signal-brief.md`，默认最多 8 条，每条附公众号发现线索和待补证标记。快报固定为 `draft_for_human_review`：不核实事实、不改变选题或研究状态、不创建研究任务、不调用模型，也不产生任何微信公众号写入或发布动作。它与“本期选题归档”和未来可发布的“营养健康行业信号周报”是不同产物，边界见 [ADR-0011](docs/adr/0011-weekly-signal-brief-horizontal-scan.md)。
+`nutrition-radar weekly brief` 把当期活跃行业信号按候选选题辅助分、文章量和时效排序，生成不可覆盖的版本化 Markdown 草稿：`exports/weekly-signal-briefs/<期次标识>/vNNN/weekly-signal-brief.md`，默认最多 8 条，每条附公众号发现线索和待补证标记。快报固定为 `draft_for_human_review`：不核实事实、不改变选题或研究状态、不创建研究任务、不调用模型，也不产生任何微信公众号写入或发布动作。它与“本期选题归档”和可发布周报文章是不同产物，边界见 [ADR-0011](docs/adr/0011-weekly-signal-brief-horizontal-scan.md)。
 
-看板已新增独立的「本周快报」标签页，与「研究与成稿」分开：按监测期次列出已有版本、展示 Markdown 全文，并由操作者点击「导出本周信号快报」生成新版本；页面只读，不自动生成、不改变任何状态。
+看板已新增独立的「本周快报」标签页，与「研究与成稿」分开：按监测期次列出已有版本、展示 Markdown 全文，并由操作者点击「导出信号快报」生成新版本；页面只读，不自动生成、不改变任何状态。
+
+### 可发布周报文章（pi 生成、人工确认）
+
+`nutrition-radar weekly article generate --live` 读取当期行业信号快照，交给 pi 公开网页 Agent 按《营养保健行业周报》参考文体写作：标题形如“营养保健行业周报|主题词1、主题词2”，正文按主题分节，每条以“日期 + 主体 + 事件 + 关键数据 + 影响/判断”呈现。生成结果写入 `exports/weekly-articles/<期次标识>/vNNN/`：
+
+- `weekly-article.md` 是可直接粘贴发布的纯正文（无 frontmatter、无内部标记）；
+- `manifest.json` 保存内部编辑备注、来源清单、生成时间与发布契约；
+- `confirmation.json` 记录人工确认状态。
+
+标题与正文中出现“待补证”“公众号发现线索”“内部状态”“人工审阅”“草稿”“未核实”等内部标记时，系统拒绝入库并要求重新生成；无法核实的事实只写入 `editor_notes` 供人工复核。文章停在 `draft_for_human_review`，由操作者 `weekly article confirm --version N` 定稿（可 `reopen` 退回）。确认后由人工把正文复制到微信公众号发布，本仓库不包含草稿箱或群发路径。边界见 [ADR-0013](docs/adr/0013-publishable-weekly-article.md)。
 
 ### 来源注册与增量同步（RedFox Phase 1）
 
 `sources` 命令维护公众号监测名单与重点网站清单，全部默认停用。公众号只有先通过 `redfox validate --live` 完成精确名称校验、由操作者把结果人工标记为 `matched` 并显式 `set-enabled` 后，`sync --live` 才会发起计费请求；优质库正文抽样有全程预算，广域库按精确展示名分页，单个账号失败不影响其他账号。`redfox broad-search --live --keyword <名称>` 只做只读补录发现，永不自动启用来源。看板“来源”标签同时显示启用门禁、校验状态、库类型、优先级和同步健康。
 
-当前验证结果：在独立仓库目录中已通过 95/95 项项目测试；历史迁移前现有 Weekly Publisher 回归测试 24/24 通过。覆盖旧数据库升级（至 schema v8）、跨期隔离、关闭后上游只读、WeRSS 跨日期接入试验标识、RedFox 分页/正文补全/抽样预算/瞬态重试/错误脱敏/人工名称门禁、广域库只读搜索、来源注册人工启用门禁、增量同步的优质/广域分流与单账号失败隔离、缺正文针对性回填、人工链接文章补录、本地知识库统计与不可覆盖快照、pi 研究 Agent 假网关与 JSON 事件解析、周信号快报连续版本、看板导出/列表/读取与审计事件、强行业主题词聚合、从历史已选题创建下游研究任务、任务书编辑与人工确认、离线稿件启动门禁、在线研究稿件与待补证来源、稿件版本不可覆盖、最终 Markdown 存档、本地 HTTP API 和简化展示阶段的前端契约。浏览器 QA 已复验“历史期次 → 研究与成稿 → 任务书状态 → 隔离 QA 库中的待启动 → 离线 V1 → 待审 V2”界面闭环、“来源”注册表标签和新增的“本周快报”标签页（版本列表与 Markdown 渲染），控制台无新增应用错误。真实 Demo 已按上方命令在本仓库重新导入并升级到 schema v8，数量仍为 1,677 篇文章、1,358 个主题簇、196 个信号 / 候选，且已实际生成 `var/demo/exports/weekly-signal-briefs/demo-2026-03/v001` 快报草稿。正式运行库已完成 30 天真实同步演练，开放期次为 `cycle-2026-07-17-08-15`，本地知识库 408 篇正文全覆盖并固化为 `var/knowledge-base/export-v003/`；每周继续 `sync --live` 与 `weekly` 的节奏由操作者执行。RedFox、DeepSeek 和 pi 的凭据均可后续在本项目自己的 `.env` 中配置，`doctor` 只报告是否配置，不显示密钥内容。
+当前验证结果：在独立仓库目录中已通过 102/102 项项目测试；历史迁移前现有 Weekly Publisher 回归测试 24/24 通过。覆盖旧数据库升级（至 schema v9）、跨期隔离、关闭后上游只读、WeRSS 跨日期接入试验标识、RedFox 分页/正文补全/抽样预算/瞬态重试/错误脱敏/人工名称门禁、广域库只读搜索、来源注册人工启用门禁、增量同步的优质/广域分流与单账号失败隔离、缺正文针对性回填、人工链接文章补录、本地知识库统计与不可覆盖快照、pi 研究 Agent 假网关与 JSON 事件解析、周信号快报连续版本、可发布周报文章的生成/内部标记拦截/确认/重开/独立版本号、看板导出/列表/读取/确认与审计事件、强行业主题词聚合、从历史已选题创建下游研究任务、任务书编辑与人工确认、离线稿件启动门禁、在线研究稿件与待补证来源、稿件版本不可覆盖、最终 Markdown 存档、本地 HTTP API 和简化展示阶段的前端契约。浏览器 QA 已复验“历史期次 → 研究与成稿 → 任务书状态 → 隔离 QA 库中的待启动 → 离线 V1 → 待审 V2”界面闭环、“来源”注册表标签和新增的“本周快报”标签页（版本列表与 Markdown 渲染），控制台无新增应用错误。真实 Demo 已按上方命令在本仓库重新导入并升级到 schema v9，数量仍为 1,677 篇文章、1,358 个主题簇、196 个信号 / 候选，且已实际生成 `var/demo/exports/weekly-signal-briefs/demo-2026-03/v001` 快报草稿。正式运行库已完成 30 天真实同步演练，开放期次为 `cycle-2026-07-17-08-15`，本地知识库 408 篇正文全覆盖并固化为 `var/knowledge-base/export-v003/`；每周继续 `sync --live`、`weekly brief` 与可选的 `weekly article generate --live` 节奏由操作者执行。RedFox、DeepSeek 和 pi 的凭据均可后续在本项目自己的 `.env` 中配置，`doctor` 只报告是否配置，不显示密钥内容。
 
 ### WeRSS 五号接入试验
 
@@ -170,6 +189,7 @@ REDFOX_MAX_RETRIES=1
 - [离线文章 Demo 与真实深度研究边界 ADR](docs/adr/0009-offline-article-demo-is-not-deep-research.md)
 - [每周横向信号快报与纵向深度研究双分支 ADR](docs/adr/0011-weekly-signal-brief-horizontal-scan.md)
 - [纵向深度研究改用 pi coding-agent ADR](docs/adr/0012-pi-agent-for-vertical-research.md)
+- [可发布周报文章与横向快报分离 ADR](docs/adr/0013-publishable-weekly-article.md)
 - [先用本地 Excel Demo、后接 RedFox ADR](docs/adr/0006-local-xlsx-demo-before-redfox.md)
 - [单库监测期次隔离 ADR](docs/adr/0007-logical-monitoring-cycles.md)
 

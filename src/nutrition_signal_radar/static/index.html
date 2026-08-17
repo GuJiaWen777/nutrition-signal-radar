@@ -144,18 +144,31 @@
           <span class="eyebrow">WEEKLY HORIZONTAL SCAN</span>
           <h2>本周信号快报</h2>
         </div>
-        <p>横向扫描草稿：汇总活跃行业信号与公众号发现线索，等待人工审阅。它不改变选题或研究状态，也不属于深度研究。</p>
+        <p>横向扫描信号快报用于内部审阅；可发布文章由 pi 研究 Agent 生成，正文可直接粘贴到公众号，发布前仍需人工确认。</p>
       </div>
       <div class="weekly-toolbar">
         <div class="weekly-meta" id="weeklyMeta">正在读取…</div>
-        <button class="primary-button" id="exportWeeklyBrief" type="button">导出本周信号快报</button>
+        <div class="weekly-actions">
+          <button class="secondary-button" id="weeklyArticleAction" type="button" hidden>生成文章（CLI）</button>
+          <button class="primary-button" id="exportWeeklyBrief" type="button">导出信号快报</button>
+        </div>
+      </div>
+      <div class="filter-group weekly-kind-toggle" aria-label="快报类型">
+        <button class="filter-button is-active" data-weekly-kind="brief">信号快报</button>
+        <button class="filter-button" data-weekly-kind="article">可发布文章</button>
       </div>
       <div class="surface table-wrap">
         <div class="surface-title"><span>已有版本</span><span class="muted" id="weeklyVersionCount"></span></div>
         <div class="brief-version-list" id="weeklyVersionList"></div>
       </div>
       <div class="surface brief-content-wrap">
-        <div class="surface-title"><span>快报内容</span><span class="muted" id="weeklyContentMeta"></span></div>
+        <div class="surface-title">
+          <span>快报内容</span>
+          <span class="weekly-content-actions">
+            <span class="muted" id="weeklyContentMeta"></span>
+            <button class="text-button" id="weeklyArticleConfirm" type="button" hidden>确认定稿</button>
+          </span>
+        </div>
         <div class="brief-content" id="weeklyContent"></div>
       </div>
     </section>
