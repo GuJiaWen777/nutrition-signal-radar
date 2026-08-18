@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -223,6 +224,88 @@ def test_online_research_failure_reverts_task_without_a_draft(tmp_path: Path) ->
     )
 
 
+def test_online_research_rejects_body_with_internal_markers(tmp_path: Path) -> None:
+    path, candidate_id, _ = _prepared_database(tmp_path)
+    _select_topic(path, candidate_id)
+    task_id = create_research_task(path, candidate_id).task_id
+    confirm_research_task(path, task_id)
+    payload = json.loads(ONLINE_JSON)
+    payload["article_body"] = "# 标题\n\n该数据仍需待补证。"
+    marker_result = AgentRunResult(
+        status="completed",
+        final_text=json.dumps(payload, ensure_ascii=False),
+        tool_calls=(),
+        event_lines=(),
+        exit_code=0,
+        stderr="",
+    )
+
+    mutation = run_online_research(path, task_id, _FakeOnlineRunner(marker_result))
+    task = get_research_task(path, task_id=task_id)
+
+    assert mutation.draft_id == 0
+    assert task is not None
+    assert task["status"] == "pending_start"
+    assert any(event["event_type"] == "online_research_failed" for event in task["events"])
+
+
+def test_online_research_accepts_signals_structured_agent_output(
+    tmp_path: Path,
+) -> None:
+    path, candidate_id, _ = _prepared_database(tmp_path)
+    _select_topic(path, candidate_id)
+    task_id = create_research_task(path, candidate_id).task_id
+    confirm_research_task(path, task_id)
+    payload = {
+        "title": "保健食品虚假宣传典型案例与执法尺度",
+        "executive_summary": "宁夏等地案例表明宣称合规正延伸到直播与私域。",
+        "signals": [
+            {
+                "category": "监管动态",
+                "title": "宁夏发布典型案例",
+                "detail": "宁夏市场监管部门公布多起保健食品虚假宣传处罚案例。",
+                "decision_implication": "企业应全渠道审查宣称。",
+                "source_type": "权威媒体",
+                "urls": ["https://example.com/ningxia"],
+            },
+            {
+                "category": "监管动态",
+                "title": "直播场景执法",
+                "detail": "直播话术成为执法重点。具体金额待补证。",
+                "decision_implication": "直播脚本需合规审查。",
+                "source_type": "监管原文",
+                "urls": ["https://example.com/samr"],
+            },
+        ],
+        "uncertainties_and_caveats": ["部分处罚决定书未公开全文。"],
+    }
+    runner = _FakeOnlineRunner(
+        AgentRunResult(
+            status="completed",
+            final_text=json.dumps(payload, ensure_ascii=False),
+            tool_calls=(),
+            event_lines=(),
+            exit_code=0,
+            stderr="",
+        )
+    )
+
+    mutation = run_online_research(path, task_id, runner)
+    task = get_research_task(path, task_id=task_id)
+
+    assert mutation.draft_id > 0
+    assert task is not None
+    draft = task["latest_draft"]
+    assert "## 监管动态" in draft["article_body"]
+    assert "宁夏发布典型案例" in draft["article_body"]
+    assert "待补证" not in draft["article_body"]
+    assert "已从可发布正文中移除" in draft["uncertainty_notes"]
+    assert {source["source_type"] for source in draft["sources"]} == {
+        "regulator",
+        "media",
+    }
+
+
 def test_confirmed_topic_creates_one_editable_prefilled_task(
     tmp_path: Path,
 ) -> None:
@@ -245,7 +328,8 @@ def test_confirmed_topic_creates_one_editable_prefilled_task(
     assert task["selection_dimensions"]
     assert len(task["known_evidence"]) == 2
     assert "不会" not in str(task["output_requirements"])
-    assert "待补证" in str(task["output_requirements"])
+    assert "可直接作为微信公众号发布" in str(task["output_requirements"])
+    assert "不得出现“待补证”" in str(task["output_requirements"])
 
 
 def test_closed_cycle_keeps_topic_read_only_but_allows_downstream_task(

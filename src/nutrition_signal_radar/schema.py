@@ -672,6 +672,49 @@ WEEKLY_ARTICLE_SCHEMA = Migration(
     ),
 )
 
+RESEARCH_SOURCE_MEDIA_TYPE_SCHEMA = Migration(
+    version=10,
+    name="research_sources_accept_media_type",
+    statements=(
+        f"""
+        CREATE TABLE research_sources_new (
+            id INTEGER PRIMARY KEY,
+            draft_id INTEGER NOT NULL
+                REFERENCES research_drafts(id) ON DELETE RESTRICT,
+            claim TEXT NOT NULL DEFAULT '',
+            source_type TEXT NOT NULL DEFAULT 'wechat_discovery'
+                CHECK (source_type IN (
+                    'wechat_discovery', 'regulator', 'research_paper',
+                    'company_announcement', 'market_data', 'media', 'other'
+                )),
+            source_name TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            url_or_reference TEXT NOT NULL DEFAULT '',
+            evidence_status TEXT NOT NULL DEFAULT 'needs_evidence'
+                CHECK (evidence_status IN ('verified', 'needs_evidence')),
+            accessed_at TEXT,
+            source_note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT ({UTC_NOW})
+        )
+        """,
+        """
+        INSERT INTO research_sources_new(
+            id, draft_id, claim, source_type, source_name, title,
+            url_or_reference, evidence_status, accessed_at, source_note, created_at
+        )
+        SELECT id, draft_id, claim, source_type, source_name, title,
+               url_or_reference, evidence_status, accessed_at, source_note, created_at
+        FROM research_sources
+        """,
+        "DROP TABLE research_sources",
+        "ALTER TABLE research_sources_new RENAME TO research_sources",
+        """
+        CREATE INDEX ix_research_sources_draft
+        ON research_sources(draft_id, id)
+        """,
+    ),
+)
+
 
 MIGRATIONS: tuple[Migration, ...] = (
     INITIAL_SCHEMA,
@@ -683,6 +726,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ARTICLE_DRAFT_SCHEMA,
     SOURCE_SYNC_AND_WEEKLY_BRIEF_SCHEMA,
     WEEKLY_ARTICLE_SCHEMA,
+    RESEARCH_SOURCE_MEDIA_TYPE_SCHEMA,
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
 

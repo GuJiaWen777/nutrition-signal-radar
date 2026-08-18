@@ -210,9 +210,10 @@ def create_research_task(
                     str(package["evidence_json"] or "[]"),
                     str(package["evidence_gaps"] or "").strip(),
                     (
-                        "产出适合微信公众号阅读的文章型深度研究稿：聚焦一个核心判断，"
-                        "正文简洁，建议约 1800—2500 字；重要事实关联互联网公开来源；"
-                        "暂时无法补足的一手证据明确标记“待补证”。"
+                        "产出可直接作为微信公众号发布的深度文章成品：聚焦一个核心判断，"
+                        "正文约 1800—2800 字、按小标题组织，每条事实写成确定性行业表述；"
+                        "标题与正文不得出现“待补证”等内部工作标记，无法核实的事实"
+                        "不写进正文，改在 uncertainty_notes 中说明；重要事实关联互联网公开来源。"
                     ),
                 ),
             )
@@ -1131,14 +1132,34 @@ def _build_online_research_request(
     task: sqlite3.Row,
 ) -> PiAgentRequest:
     evidence = _json_list(str(task["known_evidence_json"] or "[]"))
-    known = []
-    for item in evidence:
-        if isinstance(item, Mapping):
+    known: list[str] = []
+    connection = connect_database(database_path, readonly=True)
+    try:
+        for item in evidence:
+            if not isinstance(item, Mapping):
+                known.append(str(item or "").strip())
+                continue
             title = str(item.get("title") or "").strip()
             reference = str(item.get("url") or "").strip()
             known.append(f"{title}｜{reference}" if reference else title)
-        else:
-            known.append(str(item or "").strip())
+            row = None
+            if reference:
+                row = connection.execute(
+                    "SELECT content_snapshot FROM source_articles WHERE url = ? LIMIT 1",
+                    (reference,),
+                ).fetchone()
+            if row is None and title:
+                row = connection.execute(
+                    "SELECT content_snapshot FROM source_articles WHERE title = ? LIMIT 1",
+                    (title,),
+                ).fetchone()
+            snapshot = str(row["content_snapshot"] or "").strip() if row else ""
+            if snapshot:
+                known.append(
+                    f"本地存档正文节选（发现线索，仍需公开来源核验）：{snapshot[:800]}"
+                )
+    finally:
+        connection.close()
     enabled_sites = [site for site in list_priority_sites(database_path) if site.enabled]
     scope_parts = [str(task["scope"] or "").strip()]
     if str(task["geography"] or "").strip():
@@ -1176,11 +1197,179 @@ def _parse_online_research_output(text: str) -> dict[str, object]:
         raise ResearchWorkflowError("研究 Agent 未返回合法 JSON，任务已回退待启动") from exc
     if not isinstance(parsed, dict):
         raise ResearchWorkflowError("研究 Agent 返回的不是 JSON 对象")
-    if not str(parsed.get("title") or "").strip():
+    return _normalize_online_research_payload(parsed)
+
+
+def _normalize_online_research_payload(
+    parsed: Mapping[str, object],
+) -> dict[str, object]:
+    title = str(parsed.get("title") or "").strip()
+    body = str(parsed.get("article_body") or "").strip()
+    signals = parsed.get("signals")
+    dropped: list[str] = []
+    if not body and isinstance(signals, list) and signals:
+        body, dropped = _render_signals_article(parsed)
+    if not title:
         raise ResearchWorkflowError("研究 Agent 返回的 JSON 缺少标题")
-    if not str(parsed.get("article_body") or "").strip():
+    if not body:
         raise ResearchWorkflowError("研究 Agent 返回的 JSON 缺少正文")
-    return parsed
+    forbidden = _publishable_forbidden_markers(title, body)
+    if forbidden:
+        raise ResearchWorkflowError(
+            "研究 Agent 返回的标题或正文包含不可发布的内部标记："
+            + "、".join(sorted(forbidden))
+        )
+    key_judgment = str(
+        parsed.get("key_judgment") or parsed.get("executive_summary") or ""
+    ).strip()
+    action_implications = str(parsed.get("action_implications") or "").strip()
+    if not action_implications and isinstance(signals, list):
+        implications = [
+            str(signal.get("decision_implication") or "").strip()
+            for signal in signals
+            if isinstance(signal, Mapping)
+        ]
+        action_implications = "；".join(
+            value for value in implications if value
+        )[:4000]
+    uncertainty_notes = str(parsed.get("uncertainty_notes") or "").strip()
+    if not uncertainty_notes:
+        uncertain = parsed.get("uncertainties_and_caveats")
+        if isinstance(uncertain, list):
+            uncertainty_notes = "\n".join(
+                f"- {_one_line(str(item))}"
+                for item in uncertain
+                if str(item).strip()
+            )
+    if dropped:
+        uncertainty_notes = "\n".join(
+            value
+            for value in (
+                uncertainty_notes,
+                "以下语句因含内部标记已从可发布正文中移除：\n"
+                + "\n".join(f"- {item}" for item in dropped),
+            )
+            if value
+        )
+    sources = _online_sources(parsed)
+    if not sources and isinstance(signals, list):
+        sources = _sources_from_signals(signals)
+    return {
+        "title": title,
+        "key_judgment": key_judgment,
+        "article_body": body,
+        "action_implications": action_implications,
+        "uncertainty_notes": uncertainty_notes,
+        "sources": sources,
+    }
+
+
+def _render_signals_article(
+    parsed: Mapping[str, object],
+) -> tuple[str, list[str]]:
+    lines: list[str] = []
+    dropped: list[str] = []
+    summary = str(
+        parsed.get("executive_summary") or parsed.get("summary") or ""
+    ).strip()
+    if summary:
+        cleaned, removed = _strip_internal_sentences(summary)
+        if cleaned:
+            lines.extend([cleaned, ""])
+        dropped.extend(removed)
+    by_category: dict[str, list[Mapping[str, object]]] = {}
+    for signal in parsed.get("signals") or []:
+        if not isinstance(signal, Mapping):
+            continue
+        category = str(signal.get("category") or "行业信号").strip()
+        by_category.setdefault(category, []).append(signal)
+    for category, items in by_category.items():
+        lines.extend([f"## {category}", ""])
+        for item in items:
+            heading = str(item.get("title") or "").strip()
+            detail = str(item.get("detail") or "").strip()
+            if heading:
+                lines.extend([f"### {heading}", ""])
+            if detail:
+                cleaned, removed = _strip_internal_sentences(detail)
+                if cleaned:
+                    lines.extend([cleaned, ""])
+                dropped.extend(removed)
+            implication = str(item.get("decision_implication") or "").strip()
+            if implication:
+                cleaned, removed = _strip_internal_sentences(implication)
+                if cleaned:
+                    lines.extend([f"对决策者的含义：{cleaned}", ""])
+                dropped.extend(removed)
+    return "\n".join(lines).strip(), dropped
+
+
+def _sources_from_signals(
+    signals: object,
+) -> list[dict[str, str]]:
+    if not isinstance(signals, list):
+        return []
+    cleaned: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for signal in signals:
+        if not isinstance(signal, Mapping):
+            continue
+        urls = signal.get("urls") or []
+        if not isinstance(urls, list):
+            continue
+        for url in urls:
+            url = str(url or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            cleaned.append(
+                {
+                    "claim": str(signal.get("title") or "").strip()[:2000],
+                    "title": url,
+                    "url": url,
+                    "publisher": "未命名发布机构",
+                    "source_type": _normalize_source_type(
+                        str(signal.get("source_type") or "other")
+                    ),
+                }
+            )
+    return cleaned[:80]
+
+
+def _strip_internal_sentences(value: str) -> tuple[str, list[str]]:
+    text = str(value or "").strip()
+    if not _publishable_forbidden_markers(text):
+        return text, []
+    parts = re.split(r"(?<=[。！？])", text)
+    kept: list[str] = []
+    removed: list[str] = []
+    for part in parts:
+        if _publishable_forbidden_markers(part):
+            removed.append(part.strip())
+        else:
+            kept.append(part)
+    return "".join(kept).strip(), [item for item in removed if item]
+
+
+def _publishable_forbidden_markers(*texts: object) -> tuple[str, ...]:
+    markers = (
+        "待补证",
+        "公众号发现线索",
+        "内部状态",
+        "人工审阅",
+        "证据状态",
+        "draft_for_human_review",
+        "未核实",
+        "未经核实",
+        "尚未核实",
+    )
+    found: set[str] = set()
+    for text in texts:
+        value = str(text or "")
+        for marker in markers:
+            if marker in value:
+                found.add(marker)
+    return tuple(found)
 
 
 def _online_sources(parsed: Mapping[str, object]) -> list[dict[str, str]]:

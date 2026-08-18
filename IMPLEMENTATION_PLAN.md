@@ -2,7 +2,7 @@
 
 状态：`Implementation Started — P1 Source Registry / Sync / Weekly Signal Brief & Publishable Article Slices Ready; P2 Offline/Online Article-Draft Slices Ready; Independent Repository Migrated`
 基线日期：2026-08-15
-代码状态：独立脚手架、配置边界、`doctor`、SQLite schema v9、来源中立文章契约、本地 Excel 导入、规则主题聚合、双审阅队列、可编辑选题包、监测期次隔离、本期选题归档、研究任务书人工门禁及离线/在线文章稿件的版本化审阅/本地 Markdown 定稿切片已经完成；RedFox Phase 0 窄适配器和六账号数据可用性验证已完成；P1 来源注册表、人工启用门禁、增量同步、广域库只读搜索、“本周信号快报”横向扫描与 pi 生成“可发布周报文章”切片已经实现；真实公开网页研究 Agent 已通过 P2-02 烟雾测试并接入 `research run --live` 与 `weekly article generate --live`
+代码状态：独立脚手架、配置边界、`doctor`、SQLite schema v10、来源中立文章契约、本地 Excel 导入、规则主题聚合、双审阅队列、可编辑选题包、监测期次隔离、本期选题归档、研究任务书人工门禁及离线/在线文章稿件的版本化审阅/本地 Markdown 定稿切片已经完成；RedFox Phase 0 窄适配器和六账号数据可用性验证已完成；P1 来源注册表、人工启用门禁、增量同步、广域库只读搜索、“本周信号快报”横向扫描与 pi 生成“可发布周报文章”切片已经实现；真实公开网页研究 Agent 已通过 P2-02 烟雾测试并接入 `research run --live` 与 `weekly article generate --live`，深度研究正文升级为可直接发布契约
 
 ## 1. 实施目标
 
@@ -33,7 +33,7 @@
 | Codex CLI | 已安装，版本 `0.144.5`；ChatGPT 登录态下 `codex exec` 拒绝运行 | 不再作为研究后端；备选为 pi coding-agent（本机 0.84.1，已装 `pi-search-multi`） |
 | `pytest` | 已安装在扩展自己的 `.venv` | 扩展 66 项默认测试通过 |
 | 现有项目测试 | 使用扩展 `.venv` 安装根项目开发依赖后执行 | 现有 24 项测试通过，可作为“不影响现有项目”的回归基线 |
-| SQLite 运行库 | 迁移框架和 schema v9 已实现；正式 `var/radar.sqlite3` 已升级 | 来源文章全局去重，主题和选题按监测期次隔离；来源注册、同步审计、周信号快报与可发布周报文章记录纳入 v8/v9；研究任务、稿件版本和最终 Markdown 拥有独立下游生命周期；需要业务数据时显式运行 `nutrition-radar db init` |
+| SQLite 运行库 | 迁移框架和 schema v10 已实现；正式 `var/radar.sqlite3` 已升级 | 来源文章全局去重，主题和选题按监测期次隔离；来源注册、同步审计、周信号快报、可发布周报文章与 media 来源类型记录纳入 v8/v9/v10；研究任务、稿件版本和最终 Markdown 拥有独立下游生命周期；需要业务数据时显式运行 `nutrition-radar db init` |
 
 任何密钥只允许通过扩展自己的 `.env` 或进程环境传入，不写入数据库、日志、测试夹具或版本库。
 
@@ -285,7 +285,7 @@ nutrition-signal-radar/
 - 文章停在 `draft_for_human_review`，由操作者 `weekly article confirm --version N` 定稿（写入 `confirmed_at`）或 `reopen` 退回；看板“本周快报”标签内分“信号快报 / 可发布文章”视图。
 - 发布动作仍由人工完成；本仓库不包含微信公众号草稿箱或群发路径，也不自动触发 pi 调用。
 
-切片退出标准：已满足。`test_weekly_service.py`、`test_weekly_article_cli.py` 与 `test_web_app.py` 覆盖文章生成、内部标记拦截、多字段结构兼容、字符串条目渲染、快报/文章独立版本号、确认/重开、CLI 保护与看板 API；全文 106/106 测试通过。2026-08-18 已用正式 30 天期次真实生成 v002：正文零内部标记、55 条来源，等待人工确认。
+切片退出标准：已满足。`test_weekly_service.py`、`test_weekly_article_cli.py` 与 `test_web_app.py` 覆盖文章生成、内部标记拦截、多字段结构兼容、字符串条目渲染、快报/文章独立版本号、确认/重开、CLI 保护与看板 API；全文 108/108 测试通过。2026-08-18 已用正式 30 天期次真实生成 v002：正文零内部标记、55 条来源，等待人工确认。
 
 ### Phase 2：0.2 文章型深度研究稿
 
@@ -318,6 +318,7 @@ nutrition-signal-radar/
 - 真实研究 Agent 必须等 P2-02 通过公开网页来源烟雾测试后，才可向同一模型写入可核验的一手来源；离线 Demo 不计入深度研究验收。
 - 研究范围实质变化时创建关联新任务；误建任务只取消留痕，不合并、不改挂稿件、不物理删除。
 - 在线切片：`research run --task-id N --live` 只能启动已人工确认的待启动任务；`run_online_research` 先把任务置为“研究中”，调用 pi（JSON 输出契约）检索公开网页，解析后写回 `research_drafts` V1 与逐条 `research_sources`。所有 Agent 来源固定为 `needs_evidence`，不得自动视为已核实；Agent 失败、超时或非 JSON 输出会把任务回退“待启动”并记录 `online_research_failed`，不伪造稿件。输入、事件流与输出存档到 `var/raw/agent/`。
+- 可发布契约升级（2026-08-18）：任务书默认要求“标题与正文不得出现待补证等内部标记，无法核实的事实写进 uncertainty_notes”；解析层对 title/article_body 执行硬性校验，并兼容 pi 返回的 `signals` 结构（自动渲染为正文、收集逐项 URL 来源）。schema v10 让 `research_sources.source_type` 接受 `media`。同时修复 Windows 下 `pi.CMD` 对提示词中 `%` 的展开截断：提示词改由临时 `@file` 传入，任务书、日期和公众号正文节选可完整送达模型。
 
 #### P2-04 研究看板与验收（离线工作流切片已完成）
 
@@ -325,6 +326,8 @@ nutrition-signal-radar/
 - 看板首页以“任务书、稿件、已定稿”呈现进度；任务详情使用下一步提示保留任务书确认、人工启动和稿件审阅门禁。
 - 已覆盖人工启动离线 Demo、退回重生成、人工编辑另存、人工确认最终 Markdown 的完整离线演练；自动启动仍保持未实现/默认关闭。
 - P2-02 已通过，`research run --live` 已接入；首次真实验收将在操作者于看板确认一个选题包与研究任务书后，以真实任务重跑“启动 → 稿件 → 审阅 → 定稿”，不触发微信公众号动作。
+
+进度：2026-08-18 已以“保健食品虚假宣传被罚！宁夏发布典型案例”完成首次真实深度研究：人工确认选题包并创建/确认任务书后，`research run --task-id 1 --live` 产出可发布稿件 V1《宣称即风险：从宁夏典型案例看保健食品虚假宣传执法的三条新红线》（约 3000 字、25 条来源、正文零内部标记），任务进入“稿件待审”，下一步是操作者审阅退回或确认定稿。
 
 ## 6. 测试策略
 

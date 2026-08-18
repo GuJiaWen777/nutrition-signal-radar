@@ -162,7 +162,24 @@ class PiAgentRunner:
         builder = self.prompt_builder or (
             build_pi_research_json_prompt if self.json_output else build_pi_research_prompt
         )
-        command.append(builder(request))
+        prompt = builder(request)
+        prompt_path: Path | None = None
+        try:
+            # The ``pi`` shim on Windows is a .CMD wrapper.  Percent signs from
+            # URL-encoded links get expanded by cmd.exe when passed as argv and
+            # can truncate the message, so the prompt is delivered through an
+            # ``@file`` reference instead of a raw command-line argument.
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                suffix=".md",
+                delete=False,
+            ) as handle:
+                handle.write(prompt)
+                prompt_path = Path(handle.name)
+            command.append(f"@{prompt_path.resolve()}")
+        except OSError:
+            command.append(prompt)
         environment = dict(os.environ)
         if self.environment:
             environment.update(self.environment)
@@ -191,6 +208,9 @@ class PiAgentRunner:
                 exit_code=-1,
                 stderr=f"agent timed out after {self.timeout_seconds:.0f} seconds",
             )
+        finally:
+            if prompt_path is not None:
+                prompt_path.unlink(missing_ok=True)
 
         event_lines = _valid_json_lines(completed.stdout)
         final_text, tool_calls = _parse_pi_events(event_lines)
@@ -227,11 +247,17 @@ def build_pi_research_prompt(request: PiAgentRequest) -> str:
     """Render a focused user task for the pi research agent."""
 
     known = "\n".join(f"- {item}" for item in request.known_evidence) or "（无）"
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
     sections = [
         "立即执行以下研究任务。直接开始用 web_search 与 fetch_content 检索，"
         "不要读取本地文件、不要自我介绍、不要用项目名推断题目、不要请求补充信息。",
         "",
+        f"今天的日期是 {today}（北京时间）。请以这个日期判断“最近”“本期”等时间表述。",
+        "",
         f"核心研究问题：{request.research_question or '（未提供）'}",
+        "必须严格围绕上面的核心研究问题作答：标题与正文不得偏离该问题，"
+        "不得把任务扩展成泛行业扫描或百科式综述；与问题无关的监管、市场、"
+        "科研信息不要写入正文。",
         f"目标读者：{request.audience}",
         f"决策用途：{request.decision_use or '（未提供）'}",
         f"研究范围：{request.scope or '（未提供）'}",
@@ -281,9 +307,9 @@ def build_pi_research_json_prompt(request: PiAgentRequest) -> str:
 {
   "title": "文章标题",
   "key_judgment": "一段话核心判断",
-  "article_body": "面向行业决策者的 Markdown 正文",
-  "action_implications": "行动启示",
-  "uncertainty_notes": "不确定性与待补证项",
+  "article_body": "可直接作为微信公众号发布、面向行业决策者的 Markdown 正文",
+  "action_implications": "面向决策者的行动启示",
+  "uncertainty_notes": "仅供内部编辑：不确定性与待补证项，不得出现在正文",
   "sources": [
     {
       "claim": "这条来源支持的事实",
@@ -294,7 +320,9 @@ def build_pi_research_json_prompt(request: PiAgentRequest) -> str:
     }
   ]
 }
-找不到可靠来源的字段写“待补证”，绝不编造 URL。"""
+title、article_body、key_judgment、action_implications 中绝不允许出现
+“待补证”“公众号发现线索”“内部状态”“人工审阅”“未核实”等内部标记；
+无法核实的事实不要写进正文，改在 uncertainty_notes 中说明，绝不编造 URL。"""
     )
 
 
