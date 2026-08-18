@@ -1132,6 +1132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 port=args.port,
                 open_browser=args.open,
                 workspace_label="Nutrition Signal Radar",
+                pi_settings=settings,
             )
         except (FileNotFoundError, OSError) as exc:
             print(f"Radar server failed: {exc}", file=sys.stderr)

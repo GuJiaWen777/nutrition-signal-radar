@@ -132,7 +132,7 @@ function bindCycleControls() {
   document.querySelectorAll("[data-weekly-kind]").forEach((button) => {
     button.addEventListener("click", () => setWeeklyKind(button.dataset.weeklyKind));
   });
-  document.querySelector("#weeklyArticleAction").addEventListener("click", showWeeklyArticleCliHint);
+  document.querySelector("#weeklyArticleAction").addEventListener("click", generateWeeklyArticle);
   document.querySelector("#weeklyArticleConfirm").addEventListener("click", toggleWeeklyArticleStatus);
 }
 
@@ -550,7 +550,7 @@ async function renderWeeklyBrief() {
           </button>
         `;
       }).join("")
-    : '<div class="empty-column">本期尚未导出信号快报；点击右上角按钮生成 v001。</div>';
+    : '<div class="empty-column">本期尚未导出信号快报；点击「导出信号快报」生成 v001。</div>';
   versionList.querySelectorAll("[data-brief-version]").forEach((button) => {
     button.addEventListener("click", () => viewWeeklyBrief(Number(button.dataset.briefVersion)));
   });
@@ -624,7 +624,16 @@ function setWeeklyKind(kind) {
 }
 
 async function renderWeeklyPanel() {
-  document.querySelector("#weeklyArticleAction").hidden = state.weeklyKind !== "article";
+  const exportBriefButton = document.querySelector("#exportWeeklyBrief");
+  const articleButton = document.querySelector("#weeklyArticleAction");
+  exportBriefButton.hidden = false;
+  exportBriefButton.classList.remove("primary-button");
+  exportBriefButton.classList.add("secondary-button");
+  articleButton.hidden = false;
+  articleButton.classList.remove("secondary-button");
+  articleButton.classList.add("primary-button");
+  articleButton.textContent = "生成可发布文章";
+  articleButton.disabled = false;
   document.querySelector("#weeklyArticleConfirm").hidden = true;
   if (state.weeklyKind === "article") {
     await renderWeeklyArticle();
@@ -633,8 +642,40 @@ async function renderWeeklyPanel() {
   }
 }
 
-function showWeeklyArticleCliHint() {
-  showToast("请在终端运行：nutrition-radar weekly article generate --live");
+async function generateWeeklyArticle() {
+  const active = state.data?.active_cycle;
+  if (!active) {
+    showToast("请先选择一个监测期次", true);
+    return;
+  }
+  const confirmed = window.confirm(
+    "将调用 pi 模型并联网检索，生成一篇可发布周报文章，可能需要几分钟。确定继续？"
+  );
+  if (!confirmed) return;
+  const button = document.querySelector("#weeklyArticleAction");
+  button.disabled = true;
+  button.textContent = "生成中…（请勿关闭）";
+  try {
+    const response = await fetch(`/api/cycles/${active.id}/weekly-articles`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ live: true, max_signals: 8 }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `HTTP ${response.status}`);
+    }
+    showToast(
+      `已生成可发布文章 v${String(payload.version).padStart(3, "0")}，等待人工确认`
+    );
+    state.activeArticleVersion = payload.version;
+    await renderWeeklyPanel();
+  } catch (error) {
+    showToast(`生成失败：${error.message}`, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "生成可发布文章";
+  }
 }
 
 async function renderWeeklyArticle() {
@@ -674,7 +715,7 @@ async function renderWeeklyArticle() {
           </button>
         `;
       }).join("")
-    : '<div class="empty-column">本期尚未生成可发布文章；请在 CLI 运行 weekly article generate --live。</div>';
+    : '<div class="empty-column">本期尚未生成可发布文章；点击右上角「生成可发布文章」。</div>';
   versionList.querySelectorAll("[data-article-version]").forEach((button) => {
     button.addEventListener("click", () => viewWeeklyArticle(Number(button.dataset.articleVersion)));
   });

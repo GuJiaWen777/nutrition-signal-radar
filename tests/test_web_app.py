@@ -1,6 +1,7 @@
 import json
 import threading
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from nutrition_signal_radar.agent_gateway import AgentRunResult
@@ -588,6 +589,54 @@ def test_weekly_article_can_be_listed_read_confirmed_and_reopened_from_the_board
         with urlopen(reopen_request, timeout=5) as response:
             reopened = json.loads(response.read().decode("utf-8"))
         assert reopened["status"] == "draft_for_human_review"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_weekly_article_can_be_generated_from_the_board(tmp_path: Path) -> None:
+    path = _database(tmp_path)
+    runner = _ArticleRunner()
+    server = create_demo_server(path, port=0, article_runner=runner)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urlopen(f"{base_url}/api/dashboard", timeout=5) as response:
+            dashboard = json.loads(response.read().decode("utf-8"))
+        cycle_id = int(dashboard["active_cycle"]["id"])
+
+        protected = Request(
+            f"{base_url}/api/cycles/{cycle_id}/weekly-articles",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urlopen(protected, timeout=5)
+        except HTTPError as exc:
+            assert exc.code == 400
+        else:
+            raise AssertionError("expected protected generation request to fail")
+
+        generate_request = Request(
+            f"{base_url}/api/cycles/{cycle_id}/weekly-articles",
+            data=b'{"live": true, "max_signals": 8}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(generate_request, timeout=5) as response:
+            generated = json.loads(response.read().decode("utf-8"))
+        assert response.status == 201
+        assert generated["version"] == 1
+        assert generated["title"].startswith("营养保健行业周报")
+
+        with urlopen(
+            f"{base_url}/api/cycles/{cycle_id}/weekly-articles", timeout=5
+        ) as response:
+            listed = json.loads(response.read().decode("utf-8"))
+        assert len(listed["articles"]) == 1
     finally:
         server.shutdown()
         server.server_close()

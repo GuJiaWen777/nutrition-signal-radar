@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import parse_qs, urlparse
 
+from .agent_gateway import AgentGatewayError, PiAgentRunner
 from .archive_service import export_cycle_markdown_archive
+from .config import RadarSettings, load_settings
 from .cycle_service import (
     MonitoringCycleError,
     close_monitoring_cycle,
@@ -46,8 +48,11 @@ from .topic_workflow import (
 )
 from .weekly_service import (
     WeeklyArticleError,
+    WeeklyArticleRunner,
+    build_weekly_article_prompt,
     confirm_weekly_article,
     export_weekly_signal_brief,
+    generate_weekly_article,
     list_weekly_articles,
     list_weekly_signal_briefs,
     read_weekly_article,
@@ -91,6 +96,8 @@ def run_radar_server(
     workspace_label: str = "Nutrition Signal Radar",
     workspace_kind: str = "formal",
     missing_database_hint: str = "run db init, configure sources, and sync first",
+    pi_settings: RadarSettings | None = None,
+    article_runner: WeeklyArticleRunner | None = None,
 ) -> None:
     """Serve either the formal or isolated demo workspace on localhost only."""
 
@@ -105,6 +112,8 @@ def run_radar_server(
         port=port,
         workspace_label=workspace_label,
         workspace_kind=workspace_kind,
+        pi_settings=pi_settings,
+        article_runner=article_runner,
     )
     url = f"http://127.0.0.1:{server.server_port}/"
     print(f"{workspace_label}: {url}")
@@ -125,6 +134,8 @@ def create_demo_server(
     port: int = 0,
     workspace_label: str = "Nutrition Signal Radar Demo",
     workspace_kind: str = "demo",
+    pi_settings: RadarSettings | None = None,
+    article_runner: WeeklyArticleRunner | None = None,
 ) -> ThreadingHTTPServer:
     database = database_path.resolve()
     initialize_schema(database)
@@ -132,6 +143,8 @@ def create_demo_server(
         database,
         workspace_label=workspace_label,
         workspace_kind=workspace_kind,
+        pi_settings=pi_settings,
+        article_runner=article_runner,
     )
     return ThreadingHTTPServer(("127.0.0.1", port), handler)
 
@@ -141,6 +154,8 @@ def _handler_for(
     *,
     workspace_label: str,
     workspace_kind: str,
+    pi_settings: RadarSettings | None = None,
+    article_runner: WeeklyArticleRunner | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     handler_workspace_label = workspace_label
     handler_workspace_kind = workspace_kind
@@ -344,6 +359,55 @@ def _handler_for(
                         actor="demo_operator",
                     )
                     self._send_json(brief.as_dict(), HTTPStatus.CREATED)
+                    return
+                article_export_match = re.fullmatch(
+                    r"/api/cycles/(\d+)/weekly-articles", path
+                )
+                if article_export_match:
+                    body = self._read_json()
+                    if not body.get("live"):
+                        raise WeeklyArticleError(
+                            "生成可发布文章需要显式确认 live，才会调用 pi 模型与公开网页检索"
+                        )
+                    cycle_id = int(article_export_match.group(1))
+                    cycle_connection = connect_database(database_path, readonly=True)
+                    try:
+                        cycle = get_monitoring_cycle(
+                            cycle_connection, cycle_id=cycle_id
+                        )
+                    finally:
+                        cycle_connection.close()
+                    if cycle is None:
+                        raise MonitoringCycleError("监测期次不存在")
+                    max_signals = int(body.get("max_signals", 8))
+                    if not 1 <= max_signals <= 30:
+                        raise WeeklyArticleError("max_signals 必须在 1 到 30 之间")
+                    if article_runner is None:
+                        settings = pi_settings or load_settings()
+                        runner: WeeklyArticleRunner = PiAgentRunner(
+                            pi_command=[settings.pi_command],
+                            provider=settings.pi_provider,
+                            model=settings.pi_model or None,
+                            timeout_seconds=settings.pi_timeout_seconds,
+                            json_output=True,
+                            prompt_builder=build_weekly_article_prompt,
+                        )
+                    else:
+                        runner = article_runner
+                    try:
+                        article = generate_weekly_article(
+                            database_path,
+                            runner,
+                            cycle_slug=str(cycle["slug"]),
+                            max_signals=max_signals,
+                            actor="demo_operator",
+                        )
+                    except AgentGatewayError as exc:
+                        self._send_json(
+                            {"error": str(exc)}, HTTPStatus.BAD_GATEWAY
+                        )
+                        return
+                    self._send_json(article.as_dict(), HTTPStatus.CREATED)
                     return
                 article_mutation_match = re.fullmatch(
                     r"/api/cycles/(\d+)/weekly-articles/(\d+)/(confirm|reopen)", path
