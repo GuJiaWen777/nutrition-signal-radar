@@ -626,7 +626,7 @@ function setWeeklyKind(kind) {
 async function renderWeeklyPanel() {
   const exportBriefButton = document.querySelector("#exportWeeklyBrief");
   const articleButton = document.querySelector("#weeklyArticleAction");
-  exportBriefButton.hidden = false;
+  exportBriefButton.hidden = state.weeklyKind !== "brief";
   exportBriefButton.classList.remove("primary-button");
   exportBriefButton.classList.add("secondary-button");
   articleButton.hidden = false;

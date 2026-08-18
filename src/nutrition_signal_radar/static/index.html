@@ -149,13 +149,15 @@
       <div class="weekly-toolbar">
         <div class="weekly-meta" id="weeklyMeta">正在读取…</div>
         <div class="weekly-actions">
-          <button class="secondary-button" id="exportWeeklyBrief" type="button">导出信号快报</button>
           <button class="primary-button" id="weeklyArticleAction" type="button">生成可发布文章</button>
         </div>
       </div>
-      <div class="filter-group weekly-kind-toggle" aria-label="快报类型">
-        <button class="filter-button is-active" data-weekly-kind="brief">信号快报</button>
-        <button class="filter-button" data-weekly-kind="article">可发布文章</button>
+      <div class="weekly-subbar">
+        <div class="filter-group weekly-kind-toggle" aria-label="快报类型">
+          <button class="filter-button is-active" data-weekly-kind="brief">信号快报</button>
+          <button class="filter-button" data-weekly-kind="article">可发布文章</button>
+        </div>
+        <button class="secondary-button" id="exportWeeklyBrief" type="button" hidden>导出信号快报</button>
       </div>
       <div class="surface table-wrap">
         <div class="surface-title"><span>已有版本</span><span class="muted" id="weeklyVersionCount"></span></div>
