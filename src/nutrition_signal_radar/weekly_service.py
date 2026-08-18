@@ -1165,8 +1165,26 @@ def _normalize_weekly_article_payload(
             "生成内容仍包含不可发布的内部标记：" + "、".join(sorted(forbidden))
         )
     notes = _text(parsed.get("editor_notes")) or _text(parsed.get("methodology"))
-    if dropped_note:
-        notes = "\n".join(value for value in (notes, dropped_note) if value)
+    uncertain_lines: list[str] = []
+    uncertain = parsed.get("uncertain_items")
+    if isinstance(uncertain, list):
+        for item in uncertain:
+            if isinstance(item, Mapping):
+                text = _first_key(item, ("item", "detail", "text", "title"))
+                status = _first_key(item, ("status",))
+                uncertain_lines.append(
+                    f"- [{status}] {text}" if status and text else f"- {text or status}"
+                )
+            else:
+                text = _text(item)
+                if text:
+                    uncertain_lines.append(f"- {text}")
+    notes_parts = [notes, dropped_note]
+    if uncertain_lines:
+        notes_parts.append(
+            "Agent 记录、待人工复核的不确定项：\n" + "\n".join(uncertain_lines)
+        )
+    notes = "\n".join(value for value in notes_parts if value)
     return {
         "title": title,
         "summary": _text(parsed.get("summary") or parsed.get("editorial_summary")),
@@ -1254,16 +1272,22 @@ def _article_body_from(
         heading = _first_key(section, ("section_title", "section", "title", "heading"))
         if not heading:
             continue
-        lines.extend([f"## {heading}", ""])
+        section_lines: list[str] = []
         interpretation = _first_key(
             section, ("interpretation", "summary", "overview")
         )
         if interpretation:
             cleaned, removed = _strip_internal_sentences(interpretation, heading)
             if cleaned:
-                lines.extend([cleaned, ""])
+                section_lines.extend([cleaned, ""])
             dropped.extend(removed)
         for item in section.get("items") or []:
+            if isinstance(item, str):
+                cleaned, removed = _strip_internal_sentences(item, heading)
+                if cleaned:
+                    section_lines.append(f"- {cleaned}")
+                dropped.extend(removed)
+                continue
             if not isinstance(item, Mapping):
                 continue
             headline = _first_key(item, ("headline", "title", "topic"))
@@ -1271,16 +1295,16 @@ def _article_body_from(
             if not headline and not content:
                 continue
             if headline:
-                lines.extend([f"### {headline}", ""])
+                section_lines.extend([f"### {headline}", ""])
             date = _first_key(item, ("date", "published_at"))
             if date and not _forbidden_markers(date):
-                lines.extend([date, ""])
+                section_lines.extend([date, ""])
             if content:
                 cleaned, removed = _strip_internal_sentences(
                     content, headline or heading
                 )
                 if cleaned:
-                    lines.extend([cleaned, ""])
+                    section_lines.extend([cleaned, ""])
                 dropped.extend(removed)
             impact = _first_key(item, ("impact", "judgment"))
             if impact:
@@ -1288,8 +1312,11 @@ def _article_body_from(
                     impact, headline or heading
                 )
                 if cleaned:
-                    lines.extend([cleaned, ""])
+                    section_lines.extend([cleaned, ""])
                 dropped.extend(removed)
+        if not section_lines:
+            continue
+        lines.extend([f"## {heading}", "", *section_lines, ""])
     implications = parsed.get("decision_implications")
     if isinstance(implications, list):
         implication_lines: list[str] = []

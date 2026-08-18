@@ -285,7 +285,7 @@ nutrition-signal-radar/
 - 文章停在 `draft_for_human_review`，由操作者 `weekly article confirm --version N` 定稿（写入 `confirmed_at`）或 `reopen` 退回；看板“本周快报”标签内分“信号快报 / 可发布文章”视图。
 - 发布动作仍由人工完成；本仓库不包含微信公众号草稿箱或群发路径，也不自动触发 pi 调用。
 
-切片退出标准：已满足。`test_weekly_service.py`、`test_weekly_article_cli.py` 与 `test_web_app.py` 覆盖文章生成、内部标记拦截、多字段结构兼容、快报/文章独立版本号、确认/重开、CLI 保护与看板 API；全文 105/105 测试通过。2026-08-18 已用正式 30 天期次真实生成 v001：正文零内部标记、32 条来源，等待人工确认。
+切片退出标准：已满足。`test_weekly_service.py`、`test_weekly_article_cli.py` 与 `test_web_app.py` 覆盖文章生成、内部标记拦截、多字段结构兼容、字符串条目渲染、快报/文章独立版本号、确认/重开、CLI 保护与看板 API；全文 106/106 测试通过。2026-08-18 已用正式 30 天期次真实生成 v002：正文零内部标记、55 条来源，等待人工确认。
 
 ### Phase 2：0.2 文章型深度研究稿
 

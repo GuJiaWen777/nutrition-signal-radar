@@ -439,3 +439,41 @@ def test_weekly_article_handles_compact_agent_schema(tmp_path: Path) -> None:
     urls = {source["url"] for source in manifest["sources"]}
     assert {"https://example.com/probiotic", "https://example.com/fda"} <= urls
     assert "已从可发布正文中移除" in manifest["editor_notes"]
+
+
+def test_weekly_article_renders_string_items_and_skips_empty_sections(
+    tmp_path: Path,
+) -> None:
+    database_path = _demo_database(tmp_path)
+    payload = {
+        "title": "营养保健行业周报|监管趋严、市场动态",
+        "executive_summary": "本期聚焦监管与市场。",
+        "sections": [
+            {
+                "section_title": "一、政策动态",
+                "items": [{"headline": "新规征求意见", "detail": "正文内容。"}],
+            },
+            {
+                "section_title": "二、对决策者的建议",
+                "items": ["建议企业提前盘点合规档案。", "建议关注新功能申报窗口。"],
+            },
+            {"section_title": "三、空节", "items": []},
+        ],
+        "sources": [],
+        "uncertain_items": [{"item": "具体数值以正式文本为准。", "status": "待补证"}],
+    }
+
+    result = generate_weekly_article(
+        database_path,
+        FakeArticleRunner(payload=payload),
+        max_signals=5,
+    )
+
+    markdown = result.markdown_path.read_text(encoding="utf-8")
+    assert "## 二、对决策者的建议" in markdown
+    assert "- 建议企业提前盘点合规档案。" in markdown
+    assert "- 建议关注新功能申报窗口。" in markdown
+    assert "三、空节" not in markdown
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert "待人工复核的不确定项" in manifest["editor_notes"]
+    assert "具体数值以正式文本为准" in manifest["editor_notes"]
