@@ -941,6 +941,10 @@ async function openResearchTask(taskId) {
     if (runButton) {
       runButton.addEventListener("click", () => runOfflineDraftDemo(taskId));
     }
+    const runOnlineButton = content.querySelector("[data-run-online]");
+    if (runOnlineButton) {
+      runOnlineButton.addEventListener("click", () => runOnlineResearch(taskId));
+    }
     const regenerateButton = content.querySelector("[data-regenerate-offline-demo]");
     if (regenerateButton) {
       regenerateButton.addEventListener("click", () => regenerateOfflineDraftDemo(taskId));
@@ -1149,9 +1153,12 @@ function researchHandoffHtml(detail) {
     return `
       ${articleDemo}
       <div class="package-status-line"><span class="status-chip">${statusLabel}</span><span class="muted">任务 #${task.id} · ${statusHint}</span></div>
-      <div class="readiness-box is-ready"><strong>任务书已人工确认</strong><span>可以由你手动生成一份离线文章 Demo；它不会联网，也不会把发现线索当成已确认事实。</span></div>
+      <div class="readiness-box is-ready"><strong>任务书已人工确认</strong><span>可生成不联网的离线文章 Demo，或经确认后调用 pi 联网生成可发布文章；两者都不会自动发布。</span></div>
       ${taskFields}
-      <div class="research-action-bar"><button class="primary-button" type="button" data-run-offline-demo="${task.id}">启动离线文章 Demo（不联网）</button></div>
+      <div class="research-action-bar">
+        <button class="secondary-button" type="button" data-run-offline-demo="${task.id}">启动离线文章 Demo（不联网）</button>
+        <button class="primary-button" type="button" data-run-online="${task.id}">生成可发布文章（联网研究）</button>
+      </div>
     `;
   }
   const draftAction = ["draft_review", "completed"].includes(task.status)
@@ -1198,8 +1205,8 @@ function researchTaskDetailHtml(task) {
     </div>
     <p class="detail-stage-hint">下一步：${escapeHtml(researchProgressHint(task.status))}</p>
     <div class="research-demo-callout">
-      <strong>离线文章 Demo 边界</strong>
-      <span>本界面不会联网、不会调用 DeepSeek，也不会发布公众号。它只能验证“任务书 → 可审阅文章结构 → 人工定稿 Markdown”的操作链；事实仍须人工补证。</span>
+      <strong>两条生成路径</strong>
+      <span>离线 Demo 不联网，只验证“任务书 → 文章结构”的操作链；“生成可发布文章”会在你确认后调用 pi 联网检索，正文可直接发布，来源仍待人工复核。两者都不会自动发布公众号。</span>
     </div>
   `;
 
@@ -1208,10 +1215,13 @@ function researchTaskDetailHtml(task) {
       ${header}
       <section class="detail-section">
         <h3>任务书已确认，等待人工启动</h3>
-        <div class="readiness-box is-ready"><strong>可以生成离线文章 Demo</strong><span>点击后只使用当前任务书与公众号发现线索，生成 V1 待审稿；不进行任何互联网检索。</span></div>
+        <div class="readiness-box is-ready"><strong>可以启动稿件生成</strong><span>离线 Demo 只使用任务书与发现线索；联网研究经确认后调用 pi 检索公开网页，生成可发布的深度文章 V1。</span></div>
         ${taskSummary}
         ${researchEvidenceHtml(task.known_evidence || [])}
-        <div class="research-action-bar"><button class="primary-button" type="button" data-run-offline-demo="${task.id}">启动离线文章 Demo（不联网）</button></div>
+        <div class="research-action-bar">
+          <button class="secondary-button" type="button" data-run-offline-demo="${task.id}">启动离线文章 Demo（不联网）</button>
+          <button class="primary-button" type="button" data-run-online="${task.id}">生成可发布文章（联网研究）</button>
+        </div>
       </section>
     `;
   }
@@ -1692,6 +1702,34 @@ async function runOfflineDraftDemo(taskId) {
     await openResearchTask(taskId);
   } catch (error) {
     showToast(error.message, true);
+  }
+}
+
+async function runOnlineResearch(taskId) {
+  const confirmed = window.confirm(
+    "将调用 pi 模型并联网检索，生成可发布的深度研究文章，可能需要几分钟。确定继续？"
+  );
+  if (!confirmed) return;
+  showToast("联网研究进行中，可能需要几分钟…");
+  try {
+    const response = await fetch(`/api/research-tasks/${taskId}/run-online`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ live: true }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    if (payload.mutation?.draft_id) {
+      showToast(`已生成联网研究稿件 V${payload.mutation.version || 1}，等待人工审阅`);
+      await loadDashboard();
+      await openResearchTask(taskId);
+    } else {
+      showToast("研究未能生成稿件，任务已回到待启动；详情见任务事件", true);
+      await loadDashboard();
+      await openResearchTask(taskId);
+    }
+  } catch (error) {
+    showToast(`联网研究失败：${error.message}`, true);
   }
 }
 

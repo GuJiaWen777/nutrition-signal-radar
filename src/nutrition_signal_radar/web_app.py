@@ -23,6 +23,7 @@ from .cycle_service import (
 from .database import connect_database
 from .demo_pipeline import DEMO_GENERATOR
 from .research_workflow import (
+    OnlineResearchRunner,
     ResearchWorkflowError,
     confirm_research_task,
     create_research_task,
@@ -31,6 +32,7 @@ from .research_workflow import (
     list_research_tasks,
     regenerate_offline_draft_demo,
     run_offline_draft_demo,
+    run_online_research,
     save_draft_revision,
     update_research_task,
 )
@@ -136,6 +138,7 @@ def create_demo_server(
     workspace_kind: str = "demo",
     pi_settings: RadarSettings | None = None,
     article_runner: WeeklyArticleRunner | None = None,
+    research_runner: OnlineResearchRunner | None = None,
 ) -> ThreadingHTTPServer:
     database = database_path.resolve()
     initialize_schema(database)
@@ -145,6 +148,7 @@ def create_demo_server(
         workspace_kind=workspace_kind,
         pi_settings=pi_settings,
         article_runner=article_runner,
+        research_runner=research_runner,
     )
     return ThreadingHTTPServer(("127.0.0.1", port), handler)
 
@@ -156,6 +160,7 @@ def _handler_for(
     workspace_kind: str,
     pi_settings: RadarSettings | None = None,
     article_runner: WeeklyArticleRunner | None = None,
+    research_runner: OnlineResearchRunner | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     handler_workspace_label = workspace_label
     handler_workspace_kind = workspace_kind
@@ -455,7 +460,7 @@ def _handler_for(
                 r"/api/candidates/(\d+)/research-task", path
             )
             task_match = re.fullmatch(
-                r"/api/research-tasks/(\d+)/(update|confirm|run-offline-demo|regenerate-offline-demo|finalize)",
+                r"/api/research-tasks/(\d+)/(update|confirm|run-offline-demo|run-online|regenerate-offline-demo|finalize)",
                 path,
             )
             revision_match = re.fullmatch(
@@ -537,6 +542,34 @@ def _handler_for(
                                 task_id,
                                 actor="demo_operator",
                             )
+                        elif operation == "run-online":
+                            if not body.get("live"):
+                                raise ResearchWorkflowError(
+                                    "联网研究需要显式确认 live，才会调用 pi 模型与公开网页检索"
+                                )
+                            settings = pi_settings or load_settings()
+                            runner: OnlineResearchRunner = (
+                                research_runner
+                                or PiAgentRunner(
+                                    pi_command=[settings.pi_command],
+                                    provider=settings.pi_provider,
+                                    model=settings.pi_model or None,
+                                    timeout_seconds=settings.pi_timeout_seconds,
+                                    json_output=True,
+                                )
+                            )
+                            try:
+                                result = run_online_research(
+                                    database_path,
+                                    task_id,
+                                    runner,
+                                    actor="demo_operator",
+                                )
+                            except AgentGatewayError as exc:
+                                self._send_json(
+                                    {"error": str(exc)}, HTTPStatus.BAD_GATEWAY
+                                )
+                                return
                         elif operation == "regenerate-offline-demo":
                             result = regenerate_offline_draft_demo(
                                 database_path,

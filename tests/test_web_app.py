@@ -641,3 +641,77 @@ def test_weekly_article_can_be_generated_from_the_board(tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_online_research_can_be_started_from_the_board(tmp_path: Path) -> None:
+    path = _database(tmp_path)
+    connection = connect_database(path, readonly=True)
+    try:
+        candidate_id = int(
+            connection.execute("SELECT id FROM topic_candidates").fetchone()[0]
+        )
+    finally:
+        connection.close()
+    transition_candidate(path, candidate_id, "pending_decision")
+    transition_candidate(path, candidate_id, "package_drafting")
+    transition_candidate(path, candidate_id, "pending_confirmation")
+    transition_candidate(path, candidate_id, "selected")
+
+    server = create_demo_server(path, port=0, research_runner=_ArticleRunner())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urlopen(
+            Request(
+                f"{base_url}/api/candidates/{candidate_id}/research-task",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            ),
+            timeout=5,
+        ) as response:
+            task = json.loads(response.read().decode("utf-8"))["research_task"]
+        task_id = int(task["id"])
+        with urlopen(
+            Request(
+                f"{base_url}/api/research-tasks/{task_id}/confirm",
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            ),
+            timeout=5,
+        ):
+            pass
+
+        protected = Request(
+            f"{base_url}/api/research-tasks/{task_id}/run-online",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urlopen(protected, timeout=5)
+        except HTTPError as exc:
+            assert exc.code == 400
+        else:
+            raise AssertionError("expected protected run-online request to fail")
+
+        run_request = Request(
+            f"{base_url}/api/research-tasks/{task_id}/run-online",
+            data=b'{"live": true}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(run_request, timeout=5) as response:
+            generated = json.loads(response.read().decode("utf-8"))
+
+        task_after = generated["research_task"]
+        assert task_after["status"] == "draft_review"
+        assert task_after["latest_draft"]["version"] == 1
+        assert task_after["latest_draft"]["is_online_research"] is True
+        assert generated["mutation"]["draft_id"] > 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
