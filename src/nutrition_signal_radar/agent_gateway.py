@@ -41,6 +41,7 @@ class PiAgentRequest:
     known_evidence: tuple[str, ...] = ()
     evidence_gaps: str = ""
     output_requirements: str = ""
+    profile_key: str = ""
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -52,6 +53,7 @@ class PiAgentRequest:
             "known_evidence": list(self.known_evidence),
             "evidence_gaps": self.evidence_gaps,
             "output_requirements": self.output_requirements,
+            "profile_key": self.profile_key,
         }
 
 

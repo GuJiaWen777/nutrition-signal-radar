@@ -17,11 +17,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Protocol
+from uuid import uuid4
 
 from .agent_gateway import AgentRunResult, PiAgentRequest, save_agent_exchange
+from .article_contract import normalize_source_type
 from .cycle_service import MonitoringCycleError, get_monitoring_cycle
 from .database import connect_database, transaction
 from .schema import initialize_schema
+from .weekly_profiles import (
+    DEFAULT_WEEKLY_ARTICLE_PROFILE,
+    WeeklyArticleProfile,
+    resolve_weekly_article_profile,
+)
 
 
 SQL_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
@@ -35,6 +42,7 @@ PUBLISHABLE_FORBIDDEN_MARKERS = (
     "人工审阅",
     "证据状态",
     "横向扫描草稿",
+    "草稿",
     "待人工",
     "draft_for_human_review",
     "未核实",
@@ -162,6 +170,364 @@ def read_weekly_signal_brief(
     payload["exists"] = markdown.is_file()
     payload["markdown"] = markdown.read_text(encoding="utf-8") if markdown.is_file() else ""
     return payload
+
+
+def edit_weekly_signal_brief(
+    database_path: Path,
+    *,
+    cycle_id: int,
+    version: int,
+    markdown: str,
+    actor: str = "operator",
+) -> dict[str, object]:
+    """Overwrite one brief version's markdown in place with an audit event.
+
+    Signal briefs are human-review drafts: while the monitoring cycle is open,
+    the operator may correct wording directly in the current version instead of
+    creating a new vNNN.  The manifest hash and an audit event keep the edit
+    traceable.  Closed cycles stay read-only.
+    """
+
+    cleaned = str(markdown or "").strip()
+    if not cleaned:
+        raise ValueError("信号快报正文不能为空")
+    if len(cleaned) > 200_000:
+        raise ValueError("信号快报正文不能超过 200000 个字符")
+    if version < 1:
+        raise ValueError("brief version must be at least 1")
+    initialize_schema(database_path)
+    database = Path(database_path).resolve()
+    connection = connect_database(database)
+    try:
+        with transaction(connection):
+            row = connection.execute(
+                """
+                SELECT id, cycle_id, version, relative_path
+                FROM weekly_signal_briefs WHERE cycle_id = ? AND version = ?
+                """,
+                (cycle_id, version),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"信号快报 v{version:03d} 不存在")
+            cycle = get_monitoring_cycle(connection, cycle_id=int(row["cycle_id"]))
+            if cycle is None or cycle["status"] != "open":
+                raise MonitoringCycleError("监测期次已关闭；历史快报只能查看，不能编辑")
+
+            directory = database.parent / str(row["relative_path"])
+            markdown_path = directory / "weekly-signal-brief.md"
+            if not markdown_path.is_file():
+                raise ValueError("该版本缺少本地 Markdown 文件，无法编辑")
+            old_sha256 = _sha256(markdown_path)
+            _write_text_atomically(markdown_path, cleaned + "\n")
+            new_sha256 = _sha256(markdown_path)
+
+            manifest_path = directory / "manifest.json"
+            manifest: dict[str, object] = {}
+            if manifest_path.is_file():
+                try:
+                    decoded = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    decoded = {}
+                if isinstance(decoded, dict):
+                    manifest = decoded
+            files = manifest.get("files")
+            if isinstance(files, list):
+                updated_files = []
+                for entry in files:
+                    if isinstance(entry, Mapping) and entry.get("path") == "weekly-signal-brief.md":
+                        updated_files.append(
+                            {
+                                "path": "weekly-signal-brief.md",
+                                "sha256": new_sha256,
+                                "bytes": markdown_path.stat().st_size,
+                            }
+                        )
+                    else:
+                        updated_files.append(dict(entry) if isinstance(entry, Mapping) else entry)
+                manifest["files"] = updated_files
+            manifest["edited"] = {
+                "edited_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "edited_by": (actor or "operator").strip() or "operator",
+                "markdown_sha256_before": old_sha256,
+                "markdown_sha256_after": new_sha256,
+            }
+            _write_text_atomically(
+                manifest_path,
+                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            )
+            manifest_sha256 = _sha256(manifest_path)
+            connection.execute(
+                "UPDATE weekly_signal_briefs SET manifest_sha256 = ? WHERE id = ?",
+                (manifest_sha256, int(row["id"])),
+            )
+            connection.execute(
+                """
+                INSERT INTO monitoring_cycle_events(cycle_id, event_type, actor, payload_json)
+                VALUES (?, 'weekly_signal_brief_edited', ?, ?)
+                """,
+                (
+                    cycle_id,
+                    (actor or "operator").strip() or "operator",
+                    json.dumps(
+                        {
+                            "version": version,
+                            "markdown_sha256_before": old_sha256,
+                            "markdown_sha256_after": new_sha256,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                ),
+            )
+    finally:
+        connection.close()
+    return {
+        "brief_id": int(row["id"]),
+        "cycle_id": cycle_id,
+        "version": version,
+        "manifest_sha256": manifest_sha256,
+    }
+
+
+def delete_weekly_signal_brief(
+    database_path: Path,
+    *,
+    cycle_id: int,
+    version: int,
+    actor: str = "operator",
+) -> dict[str, object]:
+    """Remove one brief version and its files from an open monitoring cycle."""
+
+    if version < 1:
+        raise ValueError("brief version must be at least 1")
+    initialize_schema(database_path)
+    database = Path(database_path).resolve()
+    connection = connect_database(database)
+    relative_path = ""
+    try:
+        with transaction(connection):
+            row = connection.execute(
+                """
+                SELECT id, cycle_id, version, relative_path
+                FROM weekly_signal_briefs WHERE cycle_id = ? AND version = ?
+                """,
+                (cycle_id, version),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"信号快报 v{version:03d} 不存在")
+            cycle = get_monitoring_cycle(connection, cycle_id=int(row["cycle_id"]))
+            if cycle is None or cycle["status"] != "open":
+                raise MonitoringCycleError("监测期次已关闭；历史快报只能查看，不能删除")
+            relative_path = str(row["relative_path"])
+            connection.execute(
+                "DELETE FROM weekly_signal_briefs WHERE id = ?", (int(row["id"]),)
+            )
+            connection.execute(
+                """
+                INSERT INTO monitoring_cycle_events(cycle_id, event_type, actor, payload_json)
+                VALUES (?, 'weekly_signal_brief_deleted', ?, ?)
+                """,
+                (
+                    cycle_id,
+                    (actor or "operator").strip() or "operator",
+                    json.dumps(
+                        {"version": version, "relative_path": relative_path},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                ),
+            )
+    finally:
+        connection.close()
+    shutil.rmtree(database.parent / relative_path, ignore_errors=True)
+    return {"cycle_id": cycle_id, "version": version, "deleted": True}
+
+
+def edit_weekly_article(
+    database_path: Path,
+    *,
+    cycle_id: int,
+    version: int,
+    markdown: str,
+    actor: str = "operator",
+) -> dict[str, object]:
+    """Overwrite one weekly article version in place with an audit event.
+
+    Only draft articles can be edited; a confirmed (final) article must be
+    reopened first.  The publishable contract still applies to human edits:
+    internal markers such as “待补证” are rejected, and the title is derived
+    from the first ``#`` heading of the edited text.
+    """
+
+    cleaned = str(markdown or "").strip()
+    if not cleaned:
+        raise ValueError("可发布文章正文不能为空")
+    if len(cleaned) > 200_000:
+        raise ValueError("可发布文章正文不能超过 200000 个字符")
+    forbidden = _forbidden_markers(cleaned)
+    if forbidden:
+        raise WeeklyArticleError(
+            "编辑后的正文包含不可发布的内部标记：" + "、".join(sorted(forbidden))
+        )
+    if version < 1:
+        raise ValueError("article version must be at least 1")
+    initialize_schema(database_path)
+    database = Path(database_path).resolve()
+    connection = connect_database(database)
+    try:
+        with transaction(connection):
+            row = connection.execute(
+                """
+                SELECT id, cycle_id, version, title, relative_path, status
+                FROM weekly_articles WHERE cycle_id = ? AND version = ?
+                """,
+                (cycle_id, version),
+            ).fetchone()
+            if row is None:
+                raise WeeklyArticleError(f"可发布文章 v{version:03d} 不存在")
+            if str(row["status"]) != "draft_for_human_review":
+                raise WeeklyArticleError("已定稿文章不能直接编辑；请先「回到待编辑」")
+            cycle = get_monitoring_cycle(connection, cycle_id=int(row["cycle_id"]))
+            if cycle is None or cycle["status"] != "open":
+                raise MonitoringCycleError("监测期次已关闭；历史文章只能查看，不能编辑")
+
+            directory = database.parent / str(row["relative_path"])
+            markdown_path = directory / WEEKLY_ARTICLE_FILE_NAME
+            if not markdown_path.is_file():
+                raise WeeklyArticleError("该版本缺少本地 Markdown 文件，无法编辑")
+            old_sha256 = _sha256(markdown_path)
+            _write_text_atomically(markdown_path, cleaned + "\n")
+            new_sha256 = _sha256(markdown_path)
+
+            first_line = cleaned.splitlines()[0] if cleaned.splitlines() else ""
+            title_match = re.match(r"^#\s+(.+)$", first_line)
+            new_title = title_match.group(1).strip() if title_match else str(row["title"])
+
+            manifest_path = directory / "manifest.json"
+            manifest: dict[str, object] = {}
+            if manifest_path.is_file():
+                try:
+                    decoded = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    decoded = {}
+                if isinstance(decoded, dict):
+                    manifest = decoded
+            files = manifest.get("files")
+            if isinstance(files, list):
+                updated_files = []
+                for entry in files:
+                    if isinstance(entry, Mapping) and entry.get("path") == WEEKLY_ARTICLE_FILE_NAME:
+                        updated_files.append(
+                            {
+                                "path": WEEKLY_ARTICLE_FILE_NAME,
+                                "sha256": new_sha256,
+                                "bytes": markdown_path.stat().st_size,
+                            }
+                        )
+                    else:
+                        updated_files.append(dict(entry) if isinstance(entry, Mapping) else entry)
+                manifest["files"] = updated_files
+            manifest["title"] = new_title
+            manifest["edited"] = {
+                "edited_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "edited_by": (actor or "operator").strip() or "operator",
+                "markdown_sha256_before": old_sha256,
+                "markdown_sha256_after": new_sha256,
+            }
+            _write_text_atomically(
+                manifest_path,
+                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            )
+            manifest_sha256 = _sha256(manifest_path)
+            connection.execute(
+                """
+                UPDATE weekly_articles SET title = ?, manifest_sha256 = ? WHERE id = ?
+                """,
+                (new_title, manifest_sha256, int(row["id"])),
+            )
+            connection.execute(
+                """
+                INSERT INTO monitoring_cycle_events(cycle_id, event_type, actor, payload_json)
+                VALUES (?, 'weekly_article_edited', ?, ?)
+                """,
+                (
+                    cycle_id,
+                    (actor or "operator").strip() or "operator",
+                    json.dumps(
+                        {
+                            "version": version,
+                            "title": new_title,
+                            "markdown_sha256_before": old_sha256,
+                            "markdown_sha256_after": new_sha256,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                ),
+            )
+    finally:
+        connection.close()
+    return {
+        "article_id": int(row["id"]),
+        "cycle_id": cycle_id,
+        "version": version,
+        "title": new_title,
+        "manifest_sha256": manifest_sha256,
+    }
+
+
+def delete_weekly_article(
+    database_path: Path,
+    *,
+    cycle_id: int,
+    version: int,
+    actor: str = "operator",
+) -> dict[str, object]:
+    """Remove one weekly article version and its files from an open cycle."""
+
+    if version < 1:
+        raise ValueError("article version must be at least 1")
+    initialize_schema(database_path)
+    database = Path(database_path).resolve()
+    connection = connect_database(database)
+    relative_path = ""
+    try:
+        with transaction(connection):
+            row = connection.execute(
+                """
+                SELECT id, cycle_id, version, relative_path
+                FROM weekly_articles WHERE cycle_id = ? AND version = ?
+                """,
+                (cycle_id, version),
+            ).fetchone()
+            if row is None:
+                raise WeeklyArticleError(f"可发布文章 v{version:03d} 不存在")
+            cycle = get_monitoring_cycle(connection, cycle_id=int(row["cycle_id"]))
+            if cycle is None or cycle["status"] != "open":
+                raise MonitoringCycleError("监测期次已关闭；历史文章只能查看，不能删除")
+            relative_path = str(row["relative_path"])
+            connection.execute(
+                "DELETE FROM weekly_articles WHERE id = ?", (int(row["id"]),)
+            )
+            connection.execute(
+                """
+                INSERT INTO monitoring_cycle_events(cycle_id, event_type, actor, payload_json)
+                VALUES (?, 'weekly_article_deleted', ?, ?)
+                """,
+                (
+                    cycle_id,
+                    (actor or "operator").strip() or "operator",
+                    json.dumps(
+                        {"version": version, "relative_path": relative_path},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                ),
+            )
+    finally:
+        connection.close()
+    shutil.rmtree(database.parent / relative_path, ignore_errors=True)
+    return {"cycle_id": cycle_id, "version": version, "deleted": True}
 
 
 def export_weekly_signal_brief(
@@ -459,6 +825,7 @@ def generate_weekly_article(
     cycle_slug: str | None = None,
     max_signals: int = 8,
     actor: str = "operator",
+    profile: WeeklyArticleProfile | None = None,
 ) -> WeeklyArticleResult:
     """Generate one publishable weekly industry article through the pi agent.
 
@@ -466,10 +833,16 @@ def generate_weekly_article(
     manual publication.  Internal review language (for example “待补证”) is
     rejected from the article body; uncertainty is kept only in the manifest's
     ``editor_notes`` and ``sources`` so a human can audit before confirming.
+
+    The selected writing profile drives the prompt and a bounded quality gate:
+    when the first pass fails the profile's quality checks, the agent gets one
+    revision round (style/structure only, facts and sources untouched), and any
+    remaining soft issues are recorded in the manifest instead of looping.
     """
 
     if not 1 <= max_signals <= 30:
         raise ValueError("max_signals must be between 1 and 30")
+    profile = profile or DEFAULT_WEEKLY_ARTICLE_PROFILE
     initialize_schema(database_path)
     database = Path(database_path).resolve()
     connection = connect_database(database, readonly=True)
@@ -491,7 +864,7 @@ def generate_weekly_article(
     finally:
         connection.close()
 
-    request = _build_weekly_article_request(cycle, snapshot)
+    request = _build_weekly_article_request(cycle, snapshot, profile)
     try:
         result = runner.run(request)
     except Exception as exc:  # External runner failures must not fake an article.
@@ -516,6 +889,36 @@ def generate_weekly_article(
         error = result.stderr.strip() or f"研究 Agent 状态异常：{result.status}"
     if parsed is None:
         raise WeeklyArticleError(f"文章生成失败：{error}")
+
+    quality_issues = _weekly_article_quality_issues(parsed, profile)
+    revision_rounds = 0
+    if quality_issues:
+        revision_rounds += 1
+        revision_request = _build_weekly_article_revision_request(
+            profile, parsed, quality_issues
+        )
+        try:
+            revision_result = runner.run(revision_request)
+        except Exception as exc:  # A failed revision must not lose the first pass.
+            revision_result = AgentRunResult(
+                status="failed",
+                final_text="",
+                tool_calls=(),
+                event_lines=(),
+                exit_code=-1,
+                stderr=f"{type(exc).__name__}: {exc}"[:2000],
+            )
+        save_agent_exchange(
+            database.parent / "raw" / "agent", revision_request, revision_result
+        )
+        if revision_result.status == "completed":
+            try:
+                reparsed = _parse_weekly_article_output(revision_result.final_text)
+            except WeeklyArticleError:
+                reparsed = None
+            if reparsed is not None:
+                parsed = reparsed
+                quality_issues = _weekly_article_quality_issues(parsed, profile)
 
     root = database.parent / "exports" / "weekly-articles" / str(cycle["slug"])
     root.mkdir(parents=True, exist_ok=True)
@@ -547,7 +950,12 @@ def generate_weekly_article(
                 "generator": WEEKLY_ARTICLE_GENERATOR,
             },
             "counts": snapshot["counts"],
-            "editor_notes": _text(parsed.get("editor_notes")),
+            "editor_notes": _editor_notes_with_quality(parsed, quality_issues),
+            "profile": {"key": profile.key, "label": profile.label},
+            "quality_checks": {
+                "revision_rounds": revision_rounds,
+                "remaining_issues": list(quality_issues),
+            },
             "sources": sources,
             "publish_contract": [
                 "正文是可独立发布的公众号文章文本，不包含“待补证”等内部工作标记。",
@@ -735,7 +1143,6 @@ def _mutate_weekly_article_status(
 
             directory = database.parent / str(row["relative_path"])
             confirmation_path = directory / "confirmation.json"
-            confirmation = {"status": target_status, "confirmed_at": None, "updated_at": ""}
             if target_status == "final":
                 now = datetime.now().astimezone().isoformat(timespec="seconds")
                 confirmation = {
@@ -752,11 +1159,6 @@ def _mutate_weekly_article_status(
                     "updated_at": now,
                     "reopened_by": (actor or "operator").strip() or "operator",
                 }
-            _write_text(
-                confirmation_path,
-                json.dumps(confirmation, ensure_ascii=False, indent=2, sort_keys=True)
-                + "\n",
-            )
             if target_status == "final":
                 connection.execute(
                     f"""
@@ -795,6 +1197,14 @@ def _mutate_weekly_article_status(
                         sort_keys=True,
                     ),
                 ),
+            )
+            # The confirmation file mirrors the committed row, so write it last
+            # inside the transaction: a failure here rolls the DB change back
+            # and never leaves the two states contradicting each other.
+            _write_text_atomically(
+                confirmation_path,
+                json.dumps(confirmation, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n",
             )
         return WeeklyArticleMutationResult(
             article_id=int(row["id"]),
@@ -849,7 +1259,8 @@ def _brief_snapshot(connection, *, cycle_id: int, max_signals: int) -> dict[str,
             JOIN topic_clusters tc ON tc.id = s.cluster_id
             LEFT JOIN ranked_candidates c ON c.signal_id = s.id AND c.rank_number = 1
             WHERE tc.cycle_id = ? AND s.status = 'active'
-            ORDER BY c.score DESC NULLS LAST, s.article_count DESC, s.id
+            ORDER BY (s.priority IS NULL), s.priority,
+                     c.score DESC NULLS LAST, s.article_count DESC, s.id
             LIMIT ?
             """,
             (cycle_id, max_signals),
@@ -910,12 +1321,6 @@ def _render_weekly_signal_brief(
         f"- 活跃行业信号：{counts['signals']}",
         f"- 本次快报展示：{len(signals)}（按候选选题辅助分、文章量和时效排序）",
         "",
-        "## 使用边界",
-        "",
-        "- 这是每周横向扫描，不是深度研究报告，也不是最终文章。",
-        "- 信号卡中的文章数和独立来源估算用于判断讨论度；它们不等于独立事实验证。",
-        "- 进入深度研究必须由操作者人工确认选题包、创建并确认研究任务书；本快报不会改变任何状态。",
-        "- 本地导出不触发任何微信公众号写入或发布动作。",
     ]
     if not signals:
         lines.extend(("", "## 信号清单", "", "本期尚无可展示的行业信号。请先完成受控同步和规则信号构建。", ""))
@@ -923,6 +1328,8 @@ def _render_weekly_signal_brief(
 
     lines.extend(("", "## 信号清单", ""))
     for index, signal in enumerate(signals, start=1):
+        if index > 1:
+            lines.extend(("---", ""))
         evidence_label = {
             "verified": "已核实（仍需人工复核）",
             "mixed": "混合 / 部分待补证",
@@ -932,15 +1339,22 @@ def _render_weekly_signal_brief(
             (
                 f"### {index}. {_text(signal['signal_title'])}",
                 "",
-                f"- 议题状态：{_trend_label(signal['trend_state'])}",
-                f"- 讨论度：{signal['article_count']} 篇文章；独立来源估算 {signal['independent_source_count']}。",
-                f"- 时间：首次 {_date(signal['first_seen_at'])}；最近 {_date(signal['last_seen_at'])}。",
-                f"- 证据状态：{evidence_label}。",
-                f"- 底层事件：{_text(signal['underlying_event']) or '待人工补充'}",
-                f"- 来源共识：{_text(signal['consensus']) or '尚未形成稳定共识'}",
-                f"- 来源分歧：{_text(signal['disagreements']) or '尚未记录明显分歧'}",
-                f"- 对行业决策者的潜在含义：{_text(signal['business_implications']) or '待人工判断'}",
-                f"- 待补证：{_text(signal['data_gaps']) or '需回到监管、论文、公告或数据原文核验'}",
+                "**议题状态**：" + _trend_label(signal["trend_state"])
+                + "　**讨论度**：" + f"{signal['article_count']} 篇文章；"
+                f"独立来源估算 {signal['independent_source_count']}"
+                + "　**证据状态**：" + evidence_label,
+                "",
+                f"**时间范围**：首次 {_date(signal['first_seen_at'])}；最近 {_date(signal['last_seen_at'])}。",
+                "",
+                f"**底层事件**：{_text(signal['underlying_event']) or '待人工补充'}",
+                "",
+                f"**来源共识**：{_text(signal['consensus']) or '尚未形成稳定共识'}",
+                "",
+                f"**来源分歧**：{_text(signal['disagreements']) or '尚未记录明显分歧'}",
+                "",
+                f"**对行业决策者的含义**：{_text(signal['business_implications']) or '待人工判断'}",
+                "",
+                f"**待补证**：{_text(signal['data_gaps']) or '需回到监管、论文、公告或数据原文核验'}",
             )
         )
         if signal.get("candidate_id"):
@@ -976,6 +1390,18 @@ def _write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8", newline="\n")
 
 
+def _write_text_atomically(path: Path, content: str) -> None:
+    """Replace a file without exposing a partially written state."""
+
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(content, encoding="utf-8", newline="\n")
+        temporary.replace(path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -1006,6 +1432,7 @@ def _trend_label(value: object) -> str:
 def _build_weekly_article_request(
     cycle: Any,
     snapshot: dict[str, object],
+    profile: WeeklyArticleProfile,
 ) -> PiAgentRequest:
     known_evidence: list[str] = []
     evidence_gaps: list[str] = []
@@ -1039,18 +1466,18 @@ def _build_weekly_article_request(
     counts = snapshot["counts"]
     return PiAgentRequest(
         research_question=(
-            "把本期监测窗口内的行业信号与公开来源证据，写成一份可直接发布到"
-            "微信公众号的《营养保健行业周报》。"
+            f"把 {_date(cycle['start_date'])} 至 {_date(cycle['end_date'])} 期间营养健康行业的关键动向，"
+            "与公开来源证据一起写成一份可直接发布到微信公众号的《营养保健行业周报》。"
         ),
-        audience="营养健康行业品牌方、原料商、渠道及企业决策者，同时兼顾普通行业读者",
-        decision_use="作为独立的微信公众号文章对外发布；读者据此掌握本期行业关键动向与判断。",
+        audience=profile.audience,
+        decision_use="作为独立的微信公众号文章对外发布；读者据此掌握近期行业关键动向与判断。",
         scope=(
-            "以本期监测到的行业信号为主线，按信号的实际分布组织主题；"
-            "可使用公开网页检索核实关键事实与数据，但不得偏离本期信号主题。"
+            "以监测到的行业信号为主线，按信号的实际分布组织主题；"
+            "可使用公开网页检索核实关键事实与数据，但不得偏离这些信号主题。"
         ),
         time_range=(
             f"正文只写 {_date(cycle['start_date'])} 至 {_date(cycle['end_date'])} "
-            "这个窗口内发生的新事件；窗口内没有新进展的信号直接省略，"
+            "这个时间段内发生的新事件；该时间段内没有新进展的信号直接省略，"
             "不得用更早的监管、市场、科研或企业事件填充正文。"
         ),
         known_evidence=tuple(known_evidence),
@@ -1060,13 +1487,10 @@ def _build_weekly_article_request(
             + "\n凡无法用公开来源支撑的细节一律不写进正文，只在 editor_notes 中说明。"
         ),
         output_requirements=(
-            f"本期共 {counts['signals']} 个活跃信号、{counts['source_articles']} 篇期内来源文章。"
-            "请按参考周报文体输出：标题用「营养保健行业周报|主题词1、主题词2」；"
-            "正文按主题分节（例如：一、资本市场；二、AI+健康；三、原料创新；"
-            "四、监管趋严；五、产品创新；六、市场表现与资本动向，按本期信号实际分布选用）；"
-            "每条内容以“日期 + 主体 + 事件 + 关键数据 + 影响/判断”呈现；"
-            "面向行业决策者、简洁可读、不堆砌资料。"
+            f"本次写作基于 {counts['signals']} 个活跃行业信号、{counts['source_articles']} 篇来源文章，"
+            "请按下方写作规范与 JSON 结构输出。"
         ),
+        profile_key=profile.key,
     )
 
 
@@ -1075,12 +1499,15 @@ def build_weekly_article_prompt(request: PiAgentRequest) -> str:
 
     known = "\n".join(f"- {item}" for item in request.known_evidence) or "（无）"
     today = datetime.now().astimezone().strftime("%Y-%m-%d")
+    profile = resolve_weekly_article_profile(request.profile_key)
     sections = [
         "立即执行以下周报文章写作任务。先用 web_search 与 fetch_content 核实关键事实，"
         "不要读取本地文件、不要自我介绍、不要请求补充信息。",
         "",
-        f"今天的日期是 {today}（北京时间）。请以这个日期判断“本期”和“最近一周”，"
-        "不要写早于本期监测窗口的事件。",
+        f"今天的日期是 {today}（北京时间）。请以这个日期判断“最近”“近日”等相对表述，"
+        "不要写早于监测窗口的事件。正文指代时间时一律使用具体日期"
+        "（如“7月17日至8月15日”）或自然时段（如“最近两周”“8月上旬”），"
+        "禁止出现“本期”“期内”“监测窗口”“本周期”等内部口径词。",
         "",
         f"核心任务：{request.research_question or '（未提供）'}",
         f"目标读者：{request.audience}",
@@ -1092,28 +1519,36 @@ def build_weekly_article_prompt(request: PiAgentRequest) -> str:
         f"稿件要求：{request.output_requirements}",
         "",
         "正文写作规范（硬性）：",
-        "1. 必须是能直接作为微信公众号文章发布的完整文本，标题与正文都不允许出现"
+        f"0. 定位：{profile.positioning}",
+        "1. 内容边界：" + "；".join(profile.boundary) + "。",
+        "2. 结构：" + "；".join(profile.structure) + "。",
+        "3. 表达风格（风格调整不得改动任何事实、数据与来源）："
+        + "；".join(profile.style) + "。",
+        "4. 质量标准：" + "；".join(profile.quality) + "。",
+        "5. 合规要求：" + "；".join(profile.compliance) + "。",
+        "6. 必须是能直接作为微信公众号文章发布的完整文本；每条事实写成确定性行业表述，"
+        "避免“可能”“据说”“未经证实”等含糊暗示；标题与正文都不允许出现"
         "“待补证”“公众号发现线索”“内部状态”“人工审阅”“证据状态”“草稿”“未核实”"
-        "等内部工作标记；",
-        "2. 每条事实都要写成确定性行业表述；无法用公开来源支撑的细节不要写进正文，"
-        "避免“可能”“据说”“未经证实”等含糊暗示；",
-        "3. 标题采用「营养保健行业周报|主题词1、主题词2」，主题词用顿号连接，"
-        "不超过 4 个，能概括本期最值得关注的动向；",
-        "4. 正文约 1800—2800 字，按主题分节；小节标题风格为“一、资本市场”等；",
-        "5. 正文末尾可附“市场表现与资本动向”等快讯式小结，也可以直接结束，不写来源清单。",
-        "6. 必须严格按照下方 JSON 示例输出：字段名只能是 title、summary、article_body、"
+        "“本期”“期内”“监测窗口”“本周期”等内部标记或内部口径词。",
+        "7. 必须严格按照下方 JSON 示例输出：字段名只能是 title、summary、article_body、"
         "editor_notes、sources，不得改用 sections、report_type、coverage、"
-        "editorial_summary、methodology 等其他字段名。",
-        "7. title 必须精确采用「营养保健行业周报|主题词1、主题词2」格式，"
-        "主题词用顿号连接、2—4 个；正文必须以“已知信号证据”中的本期信号为主线，"
-        "公开检索只用于补充与核实这些信号。",
+        "editorial_summary、methodology 等其他字段名；title 必须采用"
+        "「营养保健行业周报|钩子式主标题」格式：以「营养保健行业周报|」开头，"
+        "竖线后是一条 8—30 字的钩子式主标题；"
+        "正文必须以“已知信号证据”中列出的信号为主线，公开检索只用于补充与核实这些信号。",
+        "8. 不要在正文里写来源清单，系统会根据你返回的 sources 字段在文末统一附加"
+        "“来源”一节。",
     ]
+    if profile.exemplar:
+        sections.extend(
+            ("", "参考结构示例（仅示范文体结构，内容必须替换为真实信号）：", profile.exemplar)
+        )
     prompt = "\n".join(sections)
     prompt += """
 
 只输出一个 JSON 对象，不要用 Markdown 代码围栏，不要附加解释文字。结构如下：
 {
-  "title": "营养保健行业周报|主题词1、主题词2",
+  "title": "营养保健行业周报|监管换帅：特殊食品审批节奏会变吗",
   "summary": "一段可直接发布的导语，约 80—150 字",
   "article_body": "Markdown 正文，可直接作为公众号文章发布",
   "editor_notes": "仅供内部编辑使用：无法核实的主张、数据缺口、人工复核重点；不得出现在正文",
@@ -1130,6 +1565,90 @@ def build_weekly_article_prompt(request: PiAgentRequest) -> str:
 绝不在 title、summary、article_body 中出现内部标记；找不到可靠来源的细节直接在
 editor_notes 中说明，绝不编造 URL。"""
     return prompt
+
+
+def _weekly_article_quality_issues(
+    parsed: Mapping[str, object],
+    profile: WeeklyArticleProfile,
+) -> list[str]:
+    """Run the profile's quality bar on a parsed article without touching it.
+
+    These checks are style/structure only.  They never modify facts, data or
+    sources, and a failed check never overrides the human review gate.
+    """
+
+    body = str(parsed.get("article_body") or "")
+    title = str(parsed.get("title") or "")
+    issues: list[str] = []
+    chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", body))
+    if not profile.word_count_min <= chinese_chars <= profile.word_count_max:
+        issues.append(
+            f"正文字数 {chinese_chars}（中文字符），要求 {profile.word_count_min}—{profile.word_count_max}"
+        )
+    sections = len(re.findall(r"^##\s+", body, re.MULTILINE))
+    if sections < 2:
+        issues.append(f"正文只有 {sections} 个二级分节，要求至少 2 个")
+    if not re.search(r"\d{1,2}月\d{1,2}日", body):
+        issues.append('正文缺少具体日期（如“7月17日”）')
+    themes_part = title.replace("｜", "|").split("|", 1)
+    if len(themes_part) == 2 and themes_part[0] == "营养保健行业周报":
+        headline = re.sub(r"\s+", "", themes_part[1])
+        headline_length = len(headline)
+        if not 6 <= headline_length <= 30:
+            issues.append(f"主标题 {headline_length} 字，要求 6—30 字")
+        if headline.count("、") >= 2 and "？" not in headline:
+            issues.append("主标题疑似主题词罗列（生成时尽量避免）")
+    elif title.strip():
+        issues.append("标题必须以「营养保健行业周报|」开头")
+    found_words = sorted(
+        {word for word in profile.forbidden_style_words if word in body}
+    )
+    if found_words:
+        issues.append("正文出现 AI 套话：" + "、".join(found_words))
+    internal_words = sorted(
+        {word for word in ("本期", "期内", "监测窗口", "本周期") if word in body}
+    )
+    if internal_words:
+        issues.append("正文出现内部口径词（生成时尽量避免）：" + "、".join(internal_words))
+    return issues
+
+
+def _editor_notes_with_quality(
+    parsed: Mapping[str, object],
+    quality_issues: list[str],
+) -> str:
+    notes = _text(parsed.get("editor_notes"))
+    if not quality_issues:
+        return notes
+    block = (
+        "体检未消除的剩余问题（风格/结构；事实、数据与来源未改动）：\n"
+        + "\n".join(f"- {item}" for item in quality_issues)
+    )
+    return "\n".join(value for value in (notes, block) if value)
+
+
+def _build_weekly_article_revision_request(
+    profile: WeeklyArticleProfile,
+    parsed: Mapping[str, object],
+    issues: list[str],
+) -> PiAgentRequest:
+    """Ask the agent for one style/structure revision, facts and sources frozen."""
+
+    return PiAgentRequest(
+        research_question=(
+            "对上一轮生成的周报文章进行修订。以下体检问题必须逐条解决：\n"
+            + "\n".join(f"- {item}" for item in issues)
+            + "\n只修订写法、结构与字数：所有事实、数据与来源必须原样保留，"
+            "不得新增事实、不得删除事实、不得改动 sources 中的 URL。"
+            "\n\n上一轮完整 JSON：\n" + json.dumps(dict(parsed), ensure_ascii=False)
+        ),
+        audience=profile.audience,
+        decision_use="作为独立的微信公众号文章对外发布；读者据此掌握近期行业关键动向与判断。",
+        scope="按体检意见修订上一轮输出；保持主题、事实与来源不变。",
+        time_range="保持上一轮输出中的具体日期不变。",
+        output_requirements="输出修订后的完整 JSON，字段结构与上一轮一致。",
+        profile_key=profile.key,
+    )
 
 
 def _parse_weekly_article_output(text: str) -> dict[str, object]:
@@ -1390,7 +1909,7 @@ def _weekly_article_sources(parsed: Mapping[str, object]) -> list[dict[str, str]
                 "title": str(title or "").strip()[:500] or "未命名来源页面",
                 "url": normalized_url,
                 "publisher": str(publisher or "未命名发布机构").strip()[:200],
-                "source_type": _normalize_source_type(source_type),
+                "source_type": normalize_source_type(source_type),
             }
         )
 
@@ -1441,31 +1960,6 @@ def _weekly_article_sources(parsed: Mapping[str, object]) -> list[dict[str, str]
     return cleaned[:80]
 
 
-def _normalize_source_type(value: str) -> str:
-    cleaned = re.sub(r"[（(].*?[）)]", "", str(value or "").strip())
-    normalized = re.split(r"[+、/|，,]", cleaned)[0].strip().lower()
-    mapping = {
-        "regulator": {
-            "regulator",
-            "regulatory",
-            "监管",
-            "监管原文",
-            "官方公告",
-            "政府",
-            "government",
-        },
-        "research_paper": {"research_paper", "paper", "journal", "论文", "学术", "期刊"},
-        "company_announcement": {"company_announcement", "announcement", "企业公告", "公司公告", "信披"},
-        "market_data": {"market_data", "report", "市场数据", "数据报告", "研报"},
-        "media": {"media", "news", "媒体", "新闻", "权威媒体"},
-        "wechat_discovery": {"wechat_discovery", "wechat", "公众号"},
-    }
-    for canonical, aliases in mapping.items():
-        if normalized in aliases:
-            return canonical
-    return "other"
-
-
 def _first_key(mapping: Mapping[str, object], keys: tuple[str, ...]) -> str:
     if not isinstance(mapping, Mapping):
         return ""
@@ -1479,4 +1973,27 @@ def _first_key(mapping: Mapping[str, object], keys: tuple[str, ...]) -> str:
 def _render_weekly_article_markdown(parsed: Mapping[str, object]) -> str:
     title = _text(parsed.get("title"))
     body = str(parsed.get("article_body") or "").strip()
-    return f"# {title}\n\n{body}\n".rstrip() + "\n"
+    lines = [f"# {title}", "", body] if body else [f"# {title}"]
+    numbered: list[str] = []
+    seen: set[str] = set()
+    for source in parsed.get("sources") or []:
+        if not isinstance(source, Mapping):
+            continue
+        source_title = _text(source.get("title"))
+        url = _text(source.get("url"))
+        publisher = _text(source.get("publisher"))
+        if source_title and publisher:
+            label = f"{source_title}（{publisher}）"
+        else:
+            label = source_title or publisher or "未命名来源"
+        key = url or label
+        if key in seen:
+            continue
+        seen.add(key)
+        entry = f"[{label}]({url})" if url else label
+        numbered.append(f"{len(numbered) + 1}. {entry}")
+    if numbered:
+        lines.extend(["", "## 来源", ""])
+        lines.extend(numbered)
+    lines.append("")
+    return "\n".join(lines).rstrip() + "\n"

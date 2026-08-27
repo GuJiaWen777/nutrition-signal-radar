@@ -1,14 +1,27 @@
+import hashlib
 import json
 from pathlib import Path
 
-from nutrition_signal_radar.agent_gateway import AgentRunResult
+import pytest
+
+from nutrition_signal_radar.agent_gateway import AgentRunResult, PiAgentRequest
 from nutrition_signal_radar.article_contract import ArticleBatch, NormalizedArticle
+from nutrition_signal_radar.cycle_service import MonitoringCycleError, close_monitoring_cycle
 from nutrition_signal_radar.database import connect_database
 from nutrition_signal_radar.demo_pipeline import build_demo_topics
 from nutrition_signal_radar.ingest_service import import_article_batch
+from nutrition_signal_radar.weekly_profiles import (
+    DECISION_MAKER_PROFILE,
+    DEEP_READER_PROFILE,
+)
 from nutrition_signal_radar.weekly_service import (
     WeeklyArticleError,
+    build_weekly_article_prompt,
     confirm_weekly_article,
+    delete_weekly_article,
+    delete_weekly_signal_brief,
+    edit_weekly_article,
+    edit_weekly_signal_brief,
     export_weekly_signal_brief,
     generate_weekly_article,
     list_weekly_articles,
@@ -58,11 +71,13 @@ def test_weekly_signal_brief_is_versioned_and_does_not_start_research(tmp_path: 
     assert second.version == 2
     assert first.directory.name == "v001"
     assert second.directory.name == "v002"
+    assert "使用边界" not in markdown
     assert first.markdown_path.is_file()
     assert "本周信号快报" in markdown
     assert "横向扫描" in markdown
-    assert "不会改变任何状态" in markdown
-    assert "不触发任何微信公众号写入或发布动作" in markdown
+    constraints = manifest["constraints"]
+    assert any("不触发任何微信公众号写入或发布动作" in item for item in constraints)
+    assert any("不创建研究任务" in item for item in constraints)
     assert manifest["status"] == "draft_for_human_review"
     assert manifest["brief_kind"] == "weekly_industry_signal_brief"
 
@@ -124,6 +139,26 @@ class FakeArticleRunner:
         return AgentRunResult(
             status="completed",
             final_text=json.dumps(self.payload, ensure_ascii=False),
+            tool_calls=(),
+            event_lines=(),
+            exit_code=0,
+            stderr="",
+        )
+
+
+class _SequenceArticleRunner:
+    """Return one payload per call, repeating the last for extra calls."""
+
+    def __init__(self, payloads: list[dict]) -> None:
+        self.payloads = payloads
+        self.calls: list[object] = []
+
+    def run(self, request: object) -> AgentRunResult:
+        self.calls.append(request)
+        payload = self.payloads[min(len(self.calls) - 1, len(self.payloads) - 1)]
+        return AgentRunResult(
+            status="completed",
+            final_text=json.dumps(payload, ensure_ascii=False),
             tool_calls=(),
             event_lines=(),
             exit_code=0,
@@ -207,6 +242,29 @@ def test_weekly_article_is_generated_as_publishable_markdown(tmp_path: Path) -> 
         connection.close()
 
 
+def test_weekly_article_generates_on_closed_cycle(tmp_path: Path) -> None:
+    database_path = _demo_database(tmp_path)
+    connection = connect_database(database_path, readonly=True)
+    try:
+        cycle = connection.execute("SELECT * FROM monitoring_cycles").fetchone()
+    finally:
+        connection.close()
+    close_monitoring_cycle(database_path, int(cycle["id"]))
+
+    result = generate_weekly_article(database_path, FakeArticleRunner(), max_signals=5)
+
+    assert result.version == 1
+    assert result.markdown_path.is_file()
+    connection = connect_database(database_path, readonly=True)
+    try:
+        row = connection.execute(
+            "SELECT status FROM weekly_articles WHERE version = 1"
+        ).fetchone()
+        assert row["status"] == "draft_for_human_review"
+    finally:
+        connection.close()
+
+
 def test_weekly_article_and_brief_have_independent_versioning(tmp_path: Path) -> None:
     database_path = _demo_database(tmp_path)
     brief = export_weekly_signal_brief(database_path, max_signals=5)
@@ -217,6 +275,61 @@ def test_weekly_article_and_brief_have_independent_versioning(tmp_path: Path) ->
     articles = list_weekly_articles(database_path, cycle_id=article.cycle_id)
     assert len(articles) == 1
     assert articles[0]["title"].startswith("营养保健行业周报")
+
+
+def test_weekly_article_markdown_appends_sources_section(tmp_path: Path) -> None:
+    database_path = _demo_database(tmp_path)
+    article = generate_weekly_article(database_path, FakeArticleRunner(), max_signals=5)
+
+    markdown = article.markdown_path.read_text(encoding="utf-8")
+
+    assert "## 来源" in markdown
+    assert (
+        "1. [监管总局发布会实录（市场监管总局）](https://example.com/regulator)"
+        in markdown
+    )
+    assert "待补证" not in markdown
+
+
+def test_weekly_article_generation_softly_avoids_cycle_words_in_body(
+    tmp_path: Path,
+) -> None:
+    database_path = _demo_database(tmp_path)
+    payload = _article_payload()
+    payload["article_body"] += "\n\n本期监管动态如上，期内共查处多起案件。"
+    runner = FakeArticleRunner(payload=payload)
+
+    result = generate_weekly_article(database_path, runner, max_signals=5)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+    assert result.version == 1
+    assert "本期监管动态" in result.markdown_path.read_text(encoding="utf-8")
+    assert any(
+        "内部口径词" in issue
+        for issue in manifest["quality_checks"]["remaining_issues"]
+    )
+
+
+def test_weekly_article_edit_accepts_cycle_words_in_body(
+    tmp_path: Path,
+) -> None:
+    database_path = _demo_database(tmp_path)
+    article = generate_weekly_article(database_path, FakeArticleRunner(), max_signals=5)
+    edited_markdown = "# 营养保健行业周报|监管趋严\n\n本期监管动态如上，人工修订。\n"
+
+    result = edit_weekly_article(
+        database_path,
+        cycle_id=article.cycle_id,
+        version=article.version,
+        markdown=edited_markdown,
+    )
+
+    assert result["version"] == article.version
+    read = read_weekly_article(
+        database_path, cycle_id=article.cycle_id, version=article.version
+    )
+    assert read is not None
+    assert "本期监管动态" in read["markdown"]
 
 
 def test_weekly_article_rejects_internal_markers(tmp_path: Path) -> None:
@@ -237,6 +350,298 @@ def test_weekly_article_rejects_internal_markers(tmp_path: Path) -> None:
         assert connection.execute("SELECT COUNT(*) FROM weekly_articles").fetchone()[0] == 0
     finally:
         connection.close()
+
+
+def test_weekly_article_rejects_draft_word_in_body_and_title(tmp_path: Path) -> None:
+    database_path = _demo_database(tmp_path)
+    payload = _article_payload()
+    payload["article_body"] += "\n\n本段为初稿草稿，正式发布前请删除。"
+    runner = FakeArticleRunner(payload=payload)
+
+    try:
+        generate_weekly_article(database_path, runner, max_signals=5)
+    except WeeklyArticleError as exc:
+        assert "草稿" in str(exc)
+    else:
+        raise AssertionError("expected WeeklyArticleError")
+
+    payload = _article_payload()
+    payload["title"] = "营养保健行业周报|监管趋严、原料创新（草稿）"
+    runner = FakeArticleRunner(payload=payload)
+    try:
+        generate_weekly_article(database_path, runner, max_signals=5)
+    except WeeklyArticleError as exc:
+        assert "草稿" in str(exc)
+    else:
+        raise AssertionError("expected WeeklyArticleError")
+
+    connection = connect_database(database_path, readonly=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM weekly_articles").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_weekly_signal_brief_can_be_edited_in_place(tmp_path: Path) -> None:
+    database_path = _demo_database(tmp_path)
+    brief = export_weekly_signal_brief(database_path, max_signals=5)
+    edited_markdown = "# 编辑后的快报\n\n人工补充的审阅备注。"
+
+    result = edit_weekly_signal_brief(
+        database_path,
+        cycle_id=brief.cycle_id,
+        version=brief.version,
+        markdown=edited_markdown,
+    )
+
+    assert result["version"] == brief.version
+    read = read_weekly_signal_brief(
+        database_path, cycle_id=brief.cycle_id, version=brief.version
+    )
+    assert read is not None
+    assert read["markdown"].strip() == edited_markdown.strip()
+    manifest_file = Path(read["directory_absolute"]) / "manifest.json"
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    assert manifest["edited"]["edited_by"] == "operator"
+    assert "markdown_sha256_before" in manifest["edited"]
+    connection = connect_database(database_path, readonly=True)
+    try:
+        stored_sha = connection.execute(
+            "SELECT manifest_sha256 FROM weekly_signal_briefs WHERE cycle_id = ? AND version = ?",
+            (brief.cycle_id, brief.version),
+        ).fetchone()[0]
+        edited_event = connection.execute(
+            """
+            SELECT 1 FROM monitoring_cycle_events
+            WHERE event_type = 'weekly_signal_brief_edited'
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    assert stored_sha == hashlib.sha256(manifest_file.read_bytes()).hexdigest()
+    assert edited_event is not None
+
+
+def test_weekly_signal_brief_can_be_deleted(tmp_path: Path) -> None:
+    database_path = _demo_database(tmp_path)
+    brief = export_weekly_signal_brief(database_path, max_signals=5)
+
+    result = delete_weekly_signal_brief(
+        database_path, cycle_id=brief.cycle_id, version=brief.version
+    )
+
+    assert result["deleted"] is True
+    assert (
+        read_weekly_signal_brief(
+            database_path, cycle_id=brief.cycle_id, version=brief.version
+        )
+        is None
+    )
+    assert not brief.directory.exists()
+    connection = connect_database(database_path, readonly=True)
+    try:
+        deleted_event = connection.execute(
+            """
+            SELECT 1 FROM monitoring_cycle_events
+            WHERE event_type = 'weekly_signal_brief_deleted'
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    assert deleted_event is not None
+
+
+def test_weekly_signal_brief_edit_and_delete_stop_at_closed_cycle(
+    tmp_path: Path,
+) -> None:
+    database_path = _demo_database(tmp_path)
+    brief = export_weekly_signal_brief(database_path, max_signals=5)
+    close_monitoring_cycle(database_path, brief.cycle_id)
+
+    with pytest.raises(MonitoringCycleError, match="已关闭"):
+        edit_weekly_signal_brief(
+            database_path,
+            cycle_id=brief.cycle_id,
+            version=brief.version,
+            markdown="# 修改",
+        )
+    with pytest.raises(MonitoringCycleError, match="已关闭"):
+        delete_weekly_signal_brief(
+            database_path, cycle_id=brief.cycle_id, version=brief.version
+        )
+    assert brief.directory.is_dir()
+
+
+def test_weekly_article_can_be_edited_in_place(tmp_path: Path) -> None:
+    database_path = _demo_database(tmp_path)
+    article = generate_weekly_article(database_path, FakeArticleRunner(), max_signals=5)
+    edited_markdown = "# 营养保健行业周报|监管趋严\n\n人工修订后的正文。\n"
+
+    result = edit_weekly_article(
+        database_path,
+        cycle_id=article.cycle_id,
+        version=article.version,
+        markdown=edited_markdown,
+    )
+
+    assert result["title"] == "营养保健行业周报|监管趋严"
+    read = read_weekly_article(
+        database_path, cycle_id=article.cycle_id, version=article.version
+    )
+    assert read is not None
+    assert read["title"] == "营养保健行业周报|监管趋严"
+    assert read["markdown"].strip() == edited_markdown.strip()
+    connection = connect_database(database_path, readonly=True)
+    try:
+        edited_event = connection.execute(
+            """
+            SELECT 1 FROM monitoring_cycle_events
+            WHERE event_type = 'weekly_article_edited'
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    assert edited_event is not None
+
+
+def test_weekly_article_edit_rejects_internal_markers_and_final_articles(
+    tmp_path: Path,
+) -> None:
+    database_path = _demo_database(tmp_path)
+    article = generate_weekly_article(database_path, FakeArticleRunner(), max_signals=5)
+    original_markdown = article.markdown_path.read_text(encoding="utf-8")
+
+    with pytest.raises(WeeklyArticleError, match="内部标记"):
+        edit_weekly_article(
+            database_path,
+            cycle_id=article.cycle_id,
+            version=article.version,
+            markdown="# 标题\n\n这段内容仍需待补证。",
+        )
+    assert article.markdown_path.read_text(encoding="utf-8") == original_markdown
+
+    confirm_weekly_article(
+        database_path, cycle_id=article.cycle_id, version=article.version
+    )
+    with pytest.raises(WeeklyArticleError, match="回到待编辑"):
+        edit_weekly_article(
+            database_path,
+            cycle_id=article.cycle_id,
+            version=article.version,
+            markdown="# 标题\n\n人工修订。",
+        )
+
+
+def test_weekly_article_can_be_deleted_and_stops_at_closed_cycle(
+    tmp_path: Path,
+) -> None:
+    database_path = _demo_database(tmp_path)
+    article = generate_weekly_article(database_path, FakeArticleRunner(), max_signals=5)
+
+    result = delete_weekly_article(
+        database_path, cycle_id=article.cycle_id, version=article.version
+    )
+
+    assert result["deleted"] is True
+    assert (
+        read_weekly_article(
+            database_path, cycle_id=article.cycle_id, version=article.version
+        )
+        is None
+    )
+    assert not article.directory.exists()
+    connection = connect_database(database_path, readonly=True)
+    try:
+        deleted_event = connection.execute(
+            """
+            SELECT 1 FROM monitoring_cycle_events
+            WHERE event_type = 'weekly_article_deleted'
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+    assert deleted_event is not None
+
+    second = generate_weekly_article(database_path, FakeArticleRunner(), max_signals=5)
+    close_monitoring_cycle(database_path, second.cycle_id)
+    with pytest.raises(MonitoringCycleError, match="已关闭"):
+        delete_weekly_article(
+            database_path, cycle_id=second.cycle_id, version=second.version
+        )
+    with pytest.raises(MonitoringCycleError, match="已关闭"):
+        edit_weekly_article(
+            database_path,
+            cycle_id=second.cycle_id,
+            version=second.version,
+            markdown="# 标题\n\n修改。",
+        )
+    assert second.directory.is_dir()
+
+
+def test_weekly_article_profile_style_rules_reach_prompt() -> None:
+    prompt = build_weekly_article_prompt(
+        PiAgentRequest(
+            research_question="写一篇周报文章。",
+            profile_key=DECISION_MAKER_PROFILE.key,
+        )
+    )
+
+    assert "垂直领域主笔" in prompt
+    assert "首先" in prompt and "总而言之" in prompt
+    assert "1800—2800" in prompt
+    assert "参考结构示例" in prompt
+
+    deep_prompt = build_weekly_article_prompt(
+        PiAgentRequest(
+            research_question="写一篇周报文章。",
+            profile_key=DEEP_READER_PROFILE.key,
+        )
+    )
+    assert "2600—3600" in deep_prompt
+    assert "深度解读" in deep_prompt
+
+
+def test_weekly_article_quality_gate_revises_once_and_records(
+    tmp_path: Path,
+) -> None:
+    database_path = _demo_database(tmp_path)
+    long_body = (
+        "## 一、监管动态\n\n7月17日，市场监管总局就保健食品功能目录征求意见。"
+        "行业判断与影响。"
+        + "市场信号持续升温。" * 200
+        + "\n\n## 二、市场与数据\n\n7月22日，总局部署专项整治，直播话术成为检查重点。"
+        + "企业应当重审宣称口径。" * 20
+    )
+    revised_payload = _article_payload()
+    revised_payload["article_body"] = long_body
+    runner = _SequenceArticleRunner([_article_payload(), revised_payload])
+
+    result = generate_weekly_article(database_path, runner, max_signals=5)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+    assert len(runner.calls) == 2
+    assert manifest["quality_checks"]["revision_rounds"] == 1
+    assert manifest["quality_checks"]["remaining_issues"] == []
+    assert manifest["profile"]["key"] == "industry_lead"
+    assert "市场信号持续升温" in result.markdown_path.read_text(encoding="utf-8")
+
+
+def test_weekly_article_quality_gate_records_residual_issues(
+    tmp_path: Path,
+) -> None:
+    database_path = _demo_database(tmp_path)
+    runner = FakeArticleRunner(payload=_article_payload())
+
+    result = generate_weekly_article(database_path, runner, max_signals=5)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+    assert len(runner.calls) == 2
+    assert manifest["quality_checks"]["revision_rounds"] == 1
+    assert manifest["quality_checks"]["remaining_issues"]
+    assert any(
+        "字数" in issue for issue in manifest["quality_checks"]["remaining_issues"]
+    )
+    assert "体检未消除的剩余问题" in manifest["editor_notes"]
 
 
 def test_weekly_article_can_be_confirmed_and_reopened(tmp_path: Path) -> None:
