@@ -22,6 +22,7 @@ from .demo_pipeline import build_demo_topics
 from .doctor import build_doctor_report, render_doctor_report
 from .ingest_service import import_article_batch
 from .knowledge_base import export_knowledge_base, knowledge_base_stats
+from .llm_gateway import LlmGateway, LlmGatewayError
 from .redfox_gateway import (
     DEFAULT_REDFOX_ACCOUNT_NAMES,
     RedFoxGateway,
@@ -34,6 +35,7 @@ from .redfox_wide_search import (
 )
 from .research_workflow import ResearchWorkflowError, run_online_research
 from .schema import initialize_schema, inspect_schema
+from .signal_generation import SignalAnalysisError, analyze_cycle_signals
 from .source_registry import (
     SourceRegistryError,
     configure_source_account,
@@ -312,6 +314,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     source_import_article.add_argument("--account", required=True, help="Configured source account name.")
     source_import_article.add_argument("--title", help="Optional title override when page parsing fails.")
     source_import_article.add_argument("--published-at", help="Optional publish time override, e.g. 2026-08-07 17:30.")
+    source_import_article.add_argument(
+        "--live",
+        action="store_true",
+        help="Required acknowledgement before fetching the public article page.",
+    )
     source_import_article.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
     sync = commands.add_parser(
@@ -332,6 +339,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Maximum quality-library detail requests across the complete sync (default: 30).",
     )
     sync.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
+    signals = commands.add_parser(
+        "signals",
+        help="Use the configured analysis backend to interpret rule-generated industry signals.",
+    )
+    signals_commands = signals.add_subparsers(dest="signals_command", required=True)
+    signals_analyze = signals_commands.add_parser(
+        "analyze",
+        help=(
+            "Fill interpretive fields (underlying event, consensus, disagreements, "
+            "business implications, data gaps, affected actors) of the open cycle's "
+            "active signals. Rules keep doing recall and ranking; scores and states "
+            "never change."
+        ),
+    )
+    signals_analyze.add_argument(
+        "--live",
+        action="store_true",
+        help="Required acknowledgement before any LLM API request is made.",
+    )
+    signals_analyze.add_argument(
+        "--max-signals",
+        type=int,
+        default=30,
+        help="Maximum number of active signals to analyze (default: 30).",
+    )
+    signals_analyze.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
     weekly = commands.add_parser(
         "weekly",
@@ -568,6 +602,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
 
             if args.source_command == "import-article":
+                if not args.live:
+                    payload = {
+                        "status": "protected",
+                        "message": (
+                            "Article import fetches the public WeChat page; "
+                            "rerun with --live to acknowledge the external request."
+                        ),
+                    }
+                    if args.json:
+                        print(json.dumps(payload, ensure_ascii=False, indent=2))
+                    else:
+                        print(payload["message"], file=sys.stderr)
+                    return 2
                 try:
                     result = import_wechat_article(
                         settings.database_path,
@@ -764,6 +811,67 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"{result.signal_build.signals} signals, {result.signal_build.candidates} candidates."
                 )
         return 1 if result.failed_sources else 0
+
+    if args.command == "signals" and args.signals_command == "analyze":
+        if not args.live:
+            payload = {
+                "status": "protected",
+                "message": (
+                    "Signal analysis makes billable LLM API requests; "
+                    "rerun with --live to acknowledge."
+                ),
+            }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(payload["message"], file=sys.stderr)
+            return 2
+        if not settings.llm_ready:
+            payload = {
+                "status": "not_configured",
+                "message": (
+                    "The analysis backend is not configured for this project root; "
+                    "set RADAR_LLM_API_KEY and RADAR_LLM_MODEL in .env."
+                ),
+            }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(payload["message"], file=sys.stderr)
+            return 1
+        try:
+            gateway = LlmGateway(
+                api_key=settings.llm_api_key,
+                base_url=settings.llm_base_url,
+                model=settings.llm_model,
+            )
+            result = analyze_cycle_signals(
+                settings.database_path,
+                gateway,
+                max_signals=args.max_signals,
+            )
+        except (LlmGatewayError, SignalAnalysisError, MonitoringCycleError, ValueError, OSError) as exc:
+            print(f"Signal analysis failed: {exc}", file=sys.stderr)
+            return 1
+        payload = result.as_dict()
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(
+                f"Signal analysis: {result.updated}/{len(result.outcomes)} signals updated; "
+                f"{result.failed} failed; generator {result.generated_by}."
+            )
+            for outcome in result.outcomes:
+                if outcome.status == "failed":
+                    print(
+                        f"- signal {outcome.signal_id}: failed after {outcome.attempts} attempts; "
+                        f"{outcome.message}"
+                    )
+            print(
+                "Scores, candidate states and workflow states were not changed; "
+                "run `weekly brief` to render the updated interpretations."
+            )
+        return 1 if result.failed and not result.updated else 0
 
     if args.command == "weekly":
         if args.weekly_command == "list":

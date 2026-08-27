@@ -6,9 +6,10 @@ import sqlite3
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import date
 from pathlib import Path
-from typing import Any, Mapping
-from urllib.parse import parse_qs, urlparse
+from typing import Any, Callable, Mapping
+from urllib.parse import parse_qs, quote, urlparse
 
 from .agent_gateway import AgentGatewayError, PiAgentRunner
 from .archive_service import export_cycle_markdown_archive
@@ -22,6 +23,7 @@ from .cycle_service import (
 )
 from .database import connect_database
 from .demo_pipeline import DEMO_GENERATOR
+from .redfox_gateway import RedFoxGateway, RedFoxGatewayError
 from .research_workflow import (
     OnlineResearchRunner,
     ResearchWorkflowError,
@@ -37,12 +39,18 @@ from .research_workflow import (
     update_research_task,
 )
 from .schema import initialize_schema
-from .source_registry import list_priority_sites, list_source_accounts
+from .source_registry import (
+    SourceRegistryError,
+    list_priority_sites,
+    list_source_accounts,
+)
+from .sync_service import sync_enabled_redfox_sources
 from .topic_workflow import (
     ALLOWED_TRANSITIONS,
     PACKAGE_FIELD_LABELS,
     TopicWorkflowError,
     set_candidate_review_track,
+    set_signal_priority,
     topic_package_missing_fields,
     transition_candidate,
     update_candidate_editorial_fields,
@@ -53,6 +61,10 @@ from .weekly_service import (
     WeeklyArticleRunner,
     build_weekly_article_prompt,
     confirm_weekly_article,
+    delete_weekly_article,
+    delete_weekly_signal_brief,
+    edit_weekly_article,
+    edit_weekly_signal_brief,
     export_weekly_signal_brief,
     generate_weekly_article,
     list_weekly_articles,
@@ -100,6 +112,7 @@ def run_radar_server(
     missing_database_hint: str = "run db init, configure sources, and sync first",
     pi_settings: RadarSettings | None = None,
     article_runner: WeeklyArticleRunner | None = None,
+    sync_runner: Callable[[Path, date, date], object] | None = None,
 ) -> None:
     """Serve either the formal or isolated demo workspace on localhost only."""
 
@@ -116,6 +129,7 @@ def run_radar_server(
         workspace_kind=workspace_kind,
         pi_settings=pi_settings,
         article_runner=article_runner,
+        sync_runner=sync_runner,
     )
     url = f"http://127.0.0.1:{server.server_port}/"
     print(f"{workspace_label}: {url}")
@@ -139,6 +153,7 @@ def create_demo_server(
     pi_settings: RadarSettings | None = None,
     article_runner: WeeklyArticleRunner | None = None,
     research_runner: OnlineResearchRunner | None = None,
+    sync_runner: Callable[[Path, date, date], object] | None = None,
 ) -> ThreadingHTTPServer:
     database = database_path.resolve()
     initialize_schema(database)
@@ -149,8 +164,29 @@ def create_demo_server(
         pi_settings=pi_settings,
         article_runner=article_runner,
         research_runner=research_runner,
+        sync_runner=sync_runner,
     )
     return ThreadingHTTPServer(("127.0.0.1", port), handler)
+
+
+def _safe_filename_component(value: str) -> str:
+    cleaned = re.sub(r'[\\/:*?"<>|\r\n\t]+', "-", value).strip(" .-")
+    return cleaned[:120]
+
+
+def _article_download_disposition(
+    payload: Mapping[str, object], version: int
+) -> str:
+    fallback = f"weekly-article-v{version:03d}.md"
+    title = _safe_filename_component(str(payload.get("title") or ""))
+    date_part = str(payload.get("created_at") or "")[:10]
+    filename = f"{date_part}-{title}" if date_part and title else title
+    if not filename:
+        return f'attachment; filename="{fallback}"'
+    return (
+        f'attachment; filename="{fallback}"; '
+        f"filename*=UTF-8''{quote(f'{filename}.md', safe='')}"
+    )
 
 
 def _handler_for(
@@ -161,6 +197,7 @@ def _handler_for(
     pi_settings: RadarSettings | None = None,
     article_runner: WeeklyArticleRunner | None = None,
     research_runner: OnlineResearchRunner | None = None,
+    sync_runner: Callable[[Path, date, date], object] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     handler_workspace_label = workspace_label
     handler_workspace_kind = workspace_kind
@@ -236,6 +273,29 @@ def _handler_for(
                 else:
                     self._send_json(payload)
                 return
+            brief_download_match = re.fullmatch(
+                r"/api/cycles/(\d+)/weekly-briefs/(\d+)/download", path
+            )
+            if brief_download_match:
+                version = int(brief_download_match.group(2))
+                payload = read_weekly_signal_brief(
+                    database_path,
+                    cycle_id=int(brief_download_match.group(1)),
+                    version=version,
+                )
+                if payload is None or not payload.get("markdown"):
+                    self._send_json(
+                        {"error": "weekly brief not found"}, HTTPStatus.NOT_FOUND
+                    )
+                else:
+                    self._send_bytes(
+                        str(payload["markdown"]).encode("utf-8"),
+                        "text/markdown; charset=utf-8",
+                        disposition=(
+                            f'attachment; filename="weekly-signal-brief-v{version:03d}.md"'
+                        ),
+                    )
+                return
             article_match = re.fullmatch(r"/api/cycles/(\d+)/weekly-articles", path)
             if article_match:
                 cycle_id = int(article_match.group(1))
@@ -263,6 +323,27 @@ def _handler_for(
                     )
                 else:
                     self._send_json(payload)
+                return
+            article_download_match = re.fullmatch(
+                r"/api/cycles/(\d+)/weekly-articles/(\d+)/download", path
+            )
+            if article_download_match:
+                version = int(article_download_match.group(2))
+                payload = read_weekly_article(
+                    database_path,
+                    cycle_id=int(article_download_match.group(1)),
+                    version=version,
+                )
+                if payload is None or not payload.get("markdown"):
+                    self._send_json(
+                        {"error": "weekly article not found"}, HTTPStatus.NOT_FOUND
+                    )
+                else:
+                    self._send_bytes(
+                        str(payload["markdown"]).encode("utf-8"),
+                        "text/markdown; charset=utf-8",
+                        disposition=_article_download_disposition(payload, version),
+                    )
                 return
             match = re.fullmatch(r"/api/candidates/(\d+)", path)
             if match:
@@ -313,6 +394,137 @@ def _handler_for(
                         actor="demo_operator",
                     )
                     self._send_json({"cycle": result.__dict__}, HTTPStatus.CREATED)
+                    return
+                if path == "/api/sync":
+                    body = self._read_json()
+                    start_raw = str(body.get("start_date", "")).strip()
+                    end_raw = str(body.get("end_date", "")).strip()
+                    try:
+                        start = date.fromisoformat(start_raw)
+                        end = date.fromisoformat(end_raw)
+                    except ValueError:
+                        self._send_json(
+                            {"error": "开始/结束日期必须使用 YYYY-MM-DD 格式"},
+                            HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    if start > end:
+                        self._send_json(
+                            {"error": "开始日期不能晚于结束日期"}, HTTPStatus.BAD_REQUEST
+                        )
+                        return
+                    if (end - start).days + 1 > 90:
+                        self._send_json(
+                            {"error": "单次取数区间最长 90 天"}, HTTPStatus.BAD_REQUEST
+                        )
+                        return
+                    if sync_runner is not None:
+                        try:
+                            result = sync_runner(database_path, start, end)
+                        except (MonitoringCycleError, ValueError, OSError) as exc:
+                            self._send_json(
+                                {"error": f"同步失败：{exc}"}, HTTPStatus.BAD_REQUEST
+                            )
+                            return
+                    else:
+                        settings = pi_settings or load_settings()
+                        try:
+                            enabled_sources = [
+                                account
+                                for account in list_source_accounts(settings.database_path)
+                                if account.enabled and account.validation_status == "matched"
+                            ]
+                        except (SourceRegistryError, OSError, ValueError) as exc:
+                            self._send_json(
+                                {"error": f"同步准备失败：{exc}"}, HTTPStatus.BAD_REQUEST
+                            )
+                            return
+                        if not enabled_sources:
+                            self._send_json(
+                                {
+                                    "status": "no_enabled_sources",
+                                    "error": "没有人工确认并启用的 RedFox 来源；未发起任何外部请求。",
+                                },
+                                HTTPStatus.BAD_REQUEST,
+                            )
+                            return
+                        if not settings.redfox_ready:
+                            self._send_json(
+                                {
+                                    "status": "not_configured",
+                                    "error": "REDFOX_API_KEY 未配置，无法同步。",
+                                },
+                                HTTPStatus.BAD_REQUEST,
+                            )
+                            return
+                        gateway = RedFoxGateway(
+                            settings.redfox_api_key,
+                            base_url=settings.redfox_base_url,
+                            timeout_seconds=settings.redfox_timeout_seconds,
+                            max_retries=settings.redfox_max_retries,
+                            raw_snapshot_directory=settings.redfox_raw_directory,
+                        )
+                        try:
+                            result = sync_enabled_redfox_sources(
+                                database_path,
+                                gateway,
+                                lookback_days=(end - start).days + 1,
+                                as_of=end,
+                            )
+                        except MonitoringCycleError as exc:
+                            self._send_json(
+                                {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+                            )
+                            return
+                        except (
+                            RedFoxGatewayError,
+                            SourceRegistryError,
+                            ValueError,
+                            OSError,
+                        ) as exc:
+                            self._send_json(
+                                {"error": f"同步失败：{exc}"}, HTTPStatus.BAD_GATEWAY
+                            )
+                            return
+                    payload = result.as_dict()
+                    payload["message"] = (
+                        f"RedFox sync: {result.successful_sources}/{result.attempted_sources} "
+                        f"sources completed; {result.imported_articles} normalized articles."
+                    )
+                    self._send_json(payload)
+                    return
+                signal_priority_match = re.fullmatch(
+                    r"/api/signals/(\d+)/priority", path
+                )
+                if signal_priority_match:
+                    body = self._read_json()
+                    raw = body.get("priority")
+                    try:
+                        if raw in (None, "", "null", "None"):
+                            priority = None
+                        else:
+                            priority = int(raw)
+                            if priority < 0:
+                                raise ValueError
+                    except (TypeError, ValueError):
+                        self._send_json(
+                            {"error": "priority 必须是非负整数或 null"},
+                            HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    try:
+                        result = set_signal_priority(
+                            database_path,
+                            int(signal_priority_match.group(1)),
+                            priority,
+                            actor="demo_operator",
+                        )
+                    except (TopicWorkflowError, MonitoringCycleError, ValueError) as exc:
+                        self._send_json(
+                            {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+                        )
+                        return
+                    self._send_json({"signal": result})
                     return
                 cycle_match = re.fullmatch(r"/api/cycles/(\d+)/(close|export)", path)
                 if cycle_match:
@@ -445,6 +657,56 @@ def _handler_for(
                             actor="demo_operator",
                         )
                     self._send_json(mutation.as_dict())
+                    return
+                brief_mutation_match = re.fullmatch(
+                    r"/api/cycles/(\d+)/weekly-briefs/(\d+)/(edit|delete)", path
+                )
+                if brief_mutation_match:
+                    body = self._read_json()
+                    cycle_id = int(brief_mutation_match.group(1))
+                    version = int(brief_mutation_match.group(2))
+                    operation = brief_mutation_match.group(3)
+                    if operation == "edit":
+                        mutation = edit_weekly_signal_brief(
+                            database_path,
+                            cycle_id=cycle_id,
+                            version=version,
+                            markdown=str(body.get("markdown", "")),
+                            actor="demo_operator",
+                        )
+                    else:
+                        mutation = delete_weekly_signal_brief(
+                            database_path,
+                            cycle_id=cycle_id,
+                            version=version,
+                            actor="demo_operator",
+                        )
+                    self._send_json(mutation)
+                    return
+                article_edit_delete_match = re.fullmatch(
+                    r"/api/cycles/(\d+)/weekly-articles/(\d+)/(edit|delete)", path
+                )
+                if article_edit_delete_match:
+                    body = self._read_json()
+                    cycle_id = int(article_edit_delete_match.group(1))
+                    version = int(article_edit_delete_match.group(2))
+                    operation = article_edit_delete_match.group(3)
+                    if operation == "edit":
+                        mutation = edit_weekly_article(
+                            database_path,
+                            cycle_id=cycle_id,
+                            version=version,
+                            markdown=str(body.get("markdown", "")),
+                            actor="demo_operator",
+                        )
+                    else:
+                        mutation = delete_weekly_article(
+                            database_path,
+                            cycle_id=cycle_id,
+                            version=version,
+                            actor="demo_operator",
+                        )
+                    self._send_json(mutation)
                     return
             except MonitoringCycleError as exc:
                 self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -728,10 +990,14 @@ def _handler_for(
             body: bytes,
             content_type: str,
             status: HTTPStatus = HTTPStatus.OK,
+            *,
+            disposition: str | None = None,
         ) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            if disposition:
+                self.send_header("Content-Disposition", disposition)
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'")
@@ -971,7 +1237,7 @@ def _dashboard_payload(
                 )
                 SELECT s.id, s.signal_title, s.underlying_event, s.trend_state,
                        s.article_count, s.independent_source_count,
-                       s.evidence_status, s.consensus, s.data_gaps,
+                       s.evidence_status, s.consensus, s.data_gaps, s.priority,
                        tc.source_count, tc.last_seen_at,
                        c.score AS top_score, c.id AS candidate_id,
                        c.review_track, c.track_source, c.track_reason,
@@ -982,7 +1248,7 @@ def _dashboard_payload(
                 LEFT JOIN ranked_candidates c
                     ON c.signal_id = s.id AND c.row_number = 1
                 WHERE tc.cycle_id = ?
-                ORDER BY c.score DESC, s.id
+                ORDER BY (s.priority IS NULL), s.priority, c.score DESC, s.id
                 LIMIT 200
                 """,
                 (cycle_id,),

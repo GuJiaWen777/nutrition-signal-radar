@@ -33,6 +33,7 @@
     </div>
     <div class="cycle-actions">
       <button class="secondary-button" id="exportCycle" type="button">导出本期选题归档</button>
+      <button class="primary-button" id="syncArticles" type="button">获取文章</button>
       <button class="danger-button" id="closeCycle" type="button">关闭本期</button>
       <button class="primary-button" id="newCycle" type="button">新建下一期</button>
     </div>
@@ -42,8 +43,8 @@
   <nav class="tabs" aria-label="工作台导航">
     <button class="tab is-active" data-tab="overview">总览</button>
     <button class="tab" data-tab="signals">行业信号</button>
-    <button class="tab" data-tab="board">选题看板</button>
     <button class="tab" data-tab="weekly">本周快报</button>
+    <button class="tab" data-tab="board">选题看板</button>
     <button class="tab" data-tab="research">研究与成稿</button>
     <button class="tab" data-tab="sources">来源</button>
   </nav>
@@ -109,6 +110,48 @@
       <div class="signal-grid" id="signalGrid"></div>
     </section>
 
+    <section class="panel" id="weekly">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">WEEKLY HORIZONTAL SCAN</span>
+          <h2>本周信号快报</h2>
+        </div>
+        <p>横向扫描信号快报用于内部审阅；可发布文章由 pi 研究 Agent 生成，正文可直接粘贴到公众号，发布前仍需人工确认。</p>
+      </div>
+      <div class="weekly-toolbar">
+        <div class="weekly-meta" id="weeklyMeta">正在读取…</div>
+      </div>
+      <div class="weekly-split">
+        <div class="surface weekly-column">
+          <div class="surface-title">
+            <span>信号快报 · 横向扫描草稿</span>
+            <span class="weekly-column-actions">
+              <button class="primary-button" id="exportWeeklyBrief" type="button" hidden>生成信号快报</button>
+              <button class="text-button" id="weeklyBriefDownload" type="button" hidden>导出 MD 文件</button>
+              <button class="text-button" id="weeklyBriefEdit" type="button" hidden>编辑</button>
+              <button class="text-button" id="weeklyBriefDelete" type="button" hidden>删除</button>
+            </span>
+          </div>
+          <div class="brief-meta" id="weeklyBriefMeta"></div>
+          <div class="brief-content" id="weeklyBriefContent"></div>
+        </div>
+        <div class="surface weekly-column">
+          <div class="surface-title">
+            <span>可发布文章 · 生成后等待人工确认</span>
+            <span class="weekly-column-actions">
+              <button class="primary-button" id="weeklyArticleAction" type="button" hidden>生成可发布文章</button>
+              <button class="text-button" id="weeklyArticleConfirm" type="button" hidden>确认定稿</button>
+              <button class="text-button" id="weeklyArticleEdit" type="button" hidden>编辑</button>
+              <button class="secondary-button" id="weeklyArticleDownload" type="button" hidden>导出 MD 文件</button>
+              <button class="text-button" id="weeklyArticleDelete" type="button" hidden>删除</button>
+            </span>
+          </div>
+          <div class="brief-meta" id="weeklyArticleMeta"></div>
+          <div class="brief-content" id="weeklyArticleContent"></div>
+        </div>
+      </div>
+    </section>
+
     <section class="panel" id="board">
       <div class="section-heading">
         <div>
@@ -136,43 +179,6 @@
         <summary>已归档 / 不做 <span id="archiveCount"></span></summary>
         <div id="archiveList" class="archive-list"></div>
       </details>
-    </section>
-
-    <section class="panel" id="weekly">
-      <div class="section-heading">
-        <div>
-          <span class="eyebrow">WEEKLY HORIZONTAL SCAN</span>
-          <h2>本周信号快报</h2>
-        </div>
-        <p>横向扫描信号快报用于内部审阅；可发布文章由 pi 研究 Agent 生成，正文可直接粘贴到公众号，发布前仍需人工确认。</p>
-      </div>
-      <div class="weekly-toolbar">
-        <div class="weekly-meta" id="weeklyMeta">正在读取…</div>
-        <div class="weekly-actions">
-          <button class="primary-button" id="weeklyArticleAction" type="button">生成可发布文章</button>
-        </div>
-      </div>
-      <div class="weekly-subbar">
-        <div class="filter-group weekly-kind-toggle" aria-label="快报类型">
-          <button class="filter-button is-active" data-weekly-kind="brief">信号快报</button>
-          <button class="filter-button" data-weekly-kind="article">可发布文章</button>
-        </div>
-        <button class="secondary-button" id="exportWeeklyBrief" type="button" hidden>导出信号快报</button>
-      </div>
-      <div class="surface table-wrap">
-        <div class="surface-title"><span>已有版本</span><span class="muted" id="weeklyVersionCount"></span></div>
-        <div class="brief-version-list" id="weeklyVersionList"></div>
-      </div>
-      <div class="surface brief-content-wrap">
-        <div class="surface-title">
-          <span>快报内容</span>
-          <span class="weekly-content-actions">
-            <span class="muted" id="weeklyContentMeta"></span>
-            <button class="text-button" id="weeklyArticleConfirm" type="button" hidden>确认定稿</button>
-          </span>
-        </div>
-        <div class="brief-content" id="weeklyContent"></div>
-      </div>
     </section>
 
     <section class="panel" id="research">
@@ -236,10 +242,29 @@
         <label class="form-field"><span>开始日期</span><input name="start_date" type="date" required></label>
         <label class="form-field"><span>结束日期</span><input name="end_date" type="date" required></label>
       </div>
+      <p class="muted cycle-date-hint">起止日期就是本期的数据范围：同步进来的文章按发布日期归类，落在范围内算本期、参与信号，范围外保留为上下文。默认预填下一周（周一 ~ 周日）。</p>
       <label class="form-field"><span>数据截止时间（可选）</span><input name="data_cutoff" type="datetime-local"></label>
       <div class="cycle-dialog-actions">
         <button class="secondary-button" id="cancelCycle" type="button">取消</button>
         <button class="primary-button" type="submit">创建空白期次</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="syncDialog" class="cycle-dialog">
+    <form id="syncForm" class="cycle-form">
+      <div>
+        <span class="eyebrow">FETCH SOURCE ARTICLES</span>
+        <h2>获取文章</h2>
+        <p>按日期区间从 RedFox 拉取启用公众号的文章。默认等于当前开放期次的范围；拉到区间之外的文章会保留为上下文，不参与本期信号。</p>
+      </div>
+      <div class="cycle-date-grid">
+        <label class="form-field"><span>开始日期</span><input name="start_date" type="date" required></label>
+        <label class="form-field"><span>结束日期</span><input name="end_date" type="date" required></label>
+      </div>
+      <div class="cycle-dialog-actions">
+        <button class="secondary-button" id="cancelSync" type="button">取消</button>
+        <button class="primary-button" type="submit">开始获取</button>
       </div>
     </form>
   </dialog>

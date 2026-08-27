@@ -1,5 +1,6 @@
 import json
 import threading
+from datetime import date
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -11,7 +12,10 @@ from nutrition_signal_radar.demo_pipeline import build_demo_topics
 from nutrition_signal_radar.ingest_service import import_article_batch
 from nutrition_signal_radar.topic_workflow import transition_candidate
 from nutrition_signal_radar.web_app import create_demo_server
-from nutrition_signal_radar.weekly_service import generate_weekly_article
+from nutrition_signal_radar.weekly_service import (
+    export_weekly_signal_brief,
+    generate_weekly_article,
+)
 
 
 def _database(tmp_path: Path) -> Path:
@@ -90,8 +94,39 @@ def test_static_workspace_groups_detailed_states_into_simple_display_stages() ->
     assert "值得研究 / 传播观察”只用于筛选" in index
     assert 'data-tab="weekly"' in index
     assert 'id="weekly"' in index
-    assert "renderWeeklyBrief" in script
+    assert index.index('data-tab="weekly"') < index.index('data-tab="board"')
+    assert index.index('id="weekly"') < index.index('id="board"')
+    assert "renderWeeklyPanel" in script
+    assert "renderWeeklyBriefColumn" in script
+    assert "renderWeeklyArticleColumn" in script
+    assert "parseMarkdownFrontmatter" in script
+    assert "renderBriefFrontmatter" in script
+    assert "editWeeklyBrief" in script
+    assert "deleteWeeklyBrief" in script
+    assert "editWeeklyArticle" in script
+    assert "deleteWeeklyArticle" in script
     assert "exportWeeklyBrief" in script
+    assert 'data-weekly-kind' not in index
+    assert 'id="exportWeeklyBrief"' in index
+    assert 'id="weeklyArticleAction"' in index
+    assert 'id="weeklyBriefEdit"' in index
+    assert 'id="weeklyBriefDelete"' in index
+    assert 'id="weeklyArticleEdit"' in index
+    assert 'id="weeklyArticleDelete"' in index
+    assert 'id="weeklyBriefMeta"' in index
+    assert 'id="weeklyArticleMeta"' in index
+    assert 'id="weeklyBriefVersionList"' not in index
+    assert 'id="weeklyArticleVersionList"' not in index
+    assert 'id="syncArticles"' in index
+    assert 'id="syncForm"' in index
+    assert 'id="syncDialog"' in index
+    assert "async function syncArticles" in script
+    assert "openSyncDialog" in script
+    assert "起止日期就是本期的数据范围" in index
+    assert "按日期区间从 RedFox 拉取" in index
+    assert "data-signal-priority" in script
+    assert "updateSignalPriority" in script
+    assert "文章序" in index or "文章序" in script
 
 
 def test_research_task_api_stops_at_human_confirmed_pending_start(
@@ -503,6 +538,56 @@ def test_weekly_brief_can_be_exported_listed_and_read_from_the_board(
         assert "本周信号快报" in read["markdown"]
         assert read["exists"] is True
         assert Path(read["markdown_absolute_path"]).is_file()
+
+        with urlopen(
+            f"{base_url}/api/cycles/{cycle_id}/weekly-briefs/1/download", timeout=5
+        ) as response:
+            downloaded = response.read().decode("utf-8")
+            disposition = response.headers.get("Content-Disposition", "")
+        assert "本周信号快报" in downloaded
+        assert 'attachment; filename="weekly-signal-brief-v001.md"' in disposition
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_weekly_brief_can_be_edited_and_deleted_from_the_board(
+    tmp_path: Path,
+) -> None:
+    path = _database(tmp_path)
+    brief = export_weekly_signal_brief(path, max_signals=5)
+    server = create_demo_server(path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        edit_request = Request(
+            f"{base_url}/api/cycles/{brief.cycle_id}/weekly-briefs/1/edit",
+            data=json.dumps({"markdown": "# 人工修改后的快报\n\n补充备注。"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(edit_request, timeout=5) as response:
+            edited = json.loads(response.read().decode("utf-8"))
+        assert edited["version"] == 1
+
+        with urlopen(
+            f"{base_url}/api/cycles/{brief.cycle_id}/weekly-briefs/1", timeout=5
+        ) as response:
+            read = json.loads(response.read().decode("utf-8"))
+        assert "人工修改后的快报" in read["markdown"]
+
+        delete_request = Request(
+            f"{base_url}/api/cycles/{brief.cycle_id}/weekly-briefs/1/delete",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(delete_request, timeout=5) as response:
+            deleted = json.loads(response.read().decode("utf-8"))
+        assert deleted["deleted"] is True
+        assert not brief.directory.exists()
     finally:
         server.shutdown()
         server.server_close()
@@ -562,6 +647,22 @@ def test_weekly_article_can_be_listed_read_confirmed_and_reopened_from_the_board
         assert read["title"].startswith("营养保健行业周报")
         assert "待补证" not in read["markdown"]
         assert Path(read["markdown_absolute_path"]).is_file()
+
+        with urlopen(
+            f"{base_url}/api/cycles/{article.cycle_id}/weekly-articles/1/download",
+            timeout=5,
+        ) as response:
+            downloaded = response.read().decode("utf-8")
+            disposition = response.headers.get("Content-Disposition", "")
+        assert downloaded.startswith("# 营养保健行业周报")
+        assert "监管趋严" in downloaded
+        assert 'attachment; filename="weekly-article-v001.md"' in disposition
+        assert "filename*=UTF-8''" in disposition
+        encoded_name = disposition.split("filename*=UTF-8''", 1)[1]
+        assert encoded_name.startswith("2026-")
+        assert "%E8%90%A5%E5%85%BB%E4%BF%9D%E5%81%A5" in encoded_name
+        assert "|" not in encoded_name
+        assert encoded_name.endswith(".md")
 
         confirm_request = Request(
             f"{base_url}/api/cycles/{article.cycle_id}/weekly-articles/1/confirm",
@@ -637,6 +738,111 @@ def test_weekly_article_can_be_generated_from_the_board(tmp_path: Path) -> None:
         ) as response:
             listed = json.loads(response.read().decode("utf-8"))
         assert len(listed["articles"]) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+class _FakeSyncResult:
+    def __init__(self, lookback_days: int) -> None:
+        self.lookback_days = lookback_days
+        self.successful_sources = 5
+        self.attempted_sources = 6
+        self.imported_articles = 41
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "successful_sources": self.successful_sources,
+            "attempted_sources": self.attempted_sources,
+            "imported_articles": self.imported_articles,
+        }
+
+
+def test_sync_can_be_triggered_from_the_workspace(tmp_path: Path) -> None:
+    path = _database(tmp_path)
+    calls: list[tuple[Path, date, date]] = []
+
+    def fake_sync(database_path: Path, start: date, end: date) -> _FakeSyncResult:
+        calls.append((database_path, start, end))
+        return _FakeSyncResult((end - start).days + 1)
+
+    server = create_demo_server(path, port=0, sync_runner=fake_sync)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        request = Request(
+            f"{base_url}/api/sync",
+            data=b'{"start_date": "2026-08-10", "end_date": "2026-08-16"}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        assert response.status == 200
+        assert len(calls) == 1
+        assert calls[0][1] == date(2026, 8, 10)
+        assert calls[0][2] == date(2026, 8, 16)
+        assert payload["imported_articles"] == 41
+        assert "5/6" in payload["message"]
+
+        bad = Request(
+            f"{base_url}/api/sync",
+            data=b'{"start_date": "2026-08-16", "end_date": "2026-08-10"}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urlopen(bad, timeout=5)
+        except HTTPError as exc:
+            assert exc.code == 400
+        else:
+            raise AssertionError("expected inverted date range to fail")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_signal_priority_can_be_set_from_the_board(tmp_path: Path) -> None:
+    path = _database(tmp_path)
+    server = create_demo_server(path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urlopen(f"{base_url}/api/dashboard", timeout=5) as response:
+            dashboard = json.loads(response.read().decode("utf-8"))
+        signal_id = int(dashboard["signals"][0]["id"])
+
+        request = Request(
+            f"{base_url}/api/signals/{signal_id}/priority",
+            data=b'{"priority": 0}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        assert response.status == 200
+        assert payload["signal"]["priority"] == 0
+
+        with urlopen(f"{base_url}/api/dashboard", timeout=5) as response:
+            refreshed = json.loads(response.read().decode("utf-8"))
+        assert refreshed["signals"][0]["priority"] == 0
+
+        bad = Request(
+            f"{base_url}/api/signals/{signal_id}/priority",
+            data=b'{"priority": -2}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urlopen(bad, timeout=5)
+        except HTTPError as exc:
+            assert exc.code == 400
+        else:
+            raise AssertionError("expected negative priority to fail")
     finally:
         server.shutdown()
         server.server_close()
