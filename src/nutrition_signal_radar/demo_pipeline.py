@@ -9,11 +9,11 @@ import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from difflib import SequenceMatcher
 from pathlib import Path
 
 from .cycle_service import get_monitoring_cycle
 from .database import connect_database, transaction
+from .minhash import candidate_pairs, char_shingles, jaccard, minhash_signature
 from .schema import initialize_schema
 
 
@@ -21,6 +21,11 @@ DEMO_GENERATOR = "demo_rules_v3"
 DEMO_GENERATOR_PATTERN = "demo_rules_v%"
 _CST = timezone(timedelta(hours=8), name="Asia/Shanghai")
 TITLE_SIMILARITY_THRESHOLD = 0.54
+# Near-duplicate bodies share at least this fraction of their 4-gram shingles.
+NEAR_DUP_JACCARD_THRESHOLD = 0.7
+# Above this many cluster members, MinHash + LSH replaces exhaustive pairwise
+# Jaccard comparisons (verified by scripts/compare_near_dup.py).
+MINHASH_SWITCH_THRESHOLD = 512
 SQL_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 
 # These terms are deliberately narrower than generic words such as “健康”、
@@ -801,21 +806,21 @@ def _estimated_independent_sources(members: list[_Article]) -> int:
             parent[right_root] = left_root
 
     normalized = [_normalized_content(article.content_snapshot) for article in members]
+    shingles = [char_shingles(text) for text in normalized]
     for left in range(len(members)):
         for right in range(left + 1, len(members)):
             if members[left].content_hash and members[left].content_hash == members[right].content_hash:
                 union(left, right)
-                continue
-            left_text = normalized[left]
-            right_text = normalized[right]
-            if not left_text or not right_text:
-                continue
-            length_ratio = min(len(left_text), len(right_text)) / max(len(left_text), len(right_text))
-            if length_ratio < 0.65:
-                continue
-            matcher = SequenceMatcher(None, left_text, right_text, autojunk=False)
-            if matcher.quick_ratio() >= 0.82 and matcher.ratio() >= 0.82:
+    if len(members) >= MINHASH_SWITCH_THRESHOLD:
+        signatures = [minhash_signature(s) for s in shingles]
+        for left, right in candidate_pairs(signatures, band_size=4):
+            if jaccard(shingles[left], shingles[right]) >= NEAR_DUP_JACCARD_THRESHOLD:
                 union(left, right)
+    else:
+        for left in range(len(members)):
+            for right in range(left + 1, len(members)):
+                if jaccard(shingles[left], shingles[right]) >= NEAR_DUP_JACCARD_THRESHOLD:
+                    union(left, right)
 
     text_groups = len({find(index) for index in range(len(members))})
     return max(1, min(account_count, text_groups))

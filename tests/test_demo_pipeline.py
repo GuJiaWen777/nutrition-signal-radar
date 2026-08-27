@@ -351,3 +351,115 @@ def test_demo_pipeline_does_not_group_on_generic_health_words(tmp_path: Path) ->
     assert result.clusters == 2
     assert result.multi_article_clusters == 0
     assert result.candidates == 0
+
+
+def _article_with_body(
+    external_id: str,
+    account: str,
+    title: str,
+    body: str,
+    content_hash: str,
+    reads: int = 0,
+) -> NormalizedArticle:
+    return NormalizedArticle(
+        external_id=external_id,
+        account_name=account,
+        title=title,
+        published_at="2026-03-20T09:30:00+08:00",
+        url=f"https://example.com/{external_id}",
+        content_snapshot=body,
+        content_hash=content_hash,
+        read_count=reads,
+    )
+
+
+def _import_near_dup_fixture(database_path: Path) -> None:
+    base = "市场监管部门发布益生菌产品虚假宣传典型案例通报涉及广告用语合规问题"
+    edited = base + "并提醒企业规范功效"
+    other = "研发团队完成新一代益生菌菌株临床试验研究数据显示改善肠道健康"
+    import_article_batch(
+        database_path,
+        ArticleBatch(
+            source_kind="xlsx",
+            source_path="D:/source.xlsx",
+            source_fingerprint="near-dup-fingerprint",
+            source_rows=3,
+            articles=(
+                _article_with_body("nd-1", "公众号甲", "益生菌监管案例通报发布", base, "nd-a", 10),
+                _article_with_body("nd-2", "公众号乙", "益生菌监管案例通报正式发布", edited, "nd-b", 20),
+                _article_with_body("nd-3", "公众号丙", "益生菌菌株临床试验数据发布", other, "nd-c", 30),
+            ),
+        ),
+    )
+
+
+def _independent_source_count(database_path: Path) -> int:
+    connection = connect_database(database_path, readonly=True)
+    try:
+        return int(
+            connection.execute(
+                "SELECT independent_source_count FROM industry_signals"
+            ).fetchone()[0]
+        )
+    finally:
+        connection.close()
+
+
+def test_demo_pipeline_merges_near_duplicate_bodies(tmp_path: Path) -> None:
+    database_path = tmp_path / "var" / "demo" / "radar.sqlite3"
+    _import_near_dup_fixture(database_path)
+
+    result = build_demo_topics(database_path)
+
+    assert result.clusters == 1
+    assert result.signals == 1
+    assert _independent_source_count(database_path) == 2
+
+
+def test_demo_pipeline_keeps_distinct_bodies_separate(tmp_path: Path) -> None:
+    database_path = tmp_path / "var" / "demo" / "radar.sqlite3"
+    import_article_batch(
+        database_path,
+        ArticleBatch(
+            source_kind="xlsx",
+            source_path="D:/source.xlsx",
+            source_fingerprint="distinct-fingerprint",
+            source_rows=2,
+            articles=(
+                _article_with_body(
+                    "ds-1",
+                    "公众号甲",
+                    "益生菌监管案例通报发布",
+                    "市场监管部门发布益生菌产品虚假宣传典型案例通报涉及广告用语合规问题",
+                    "ds-a",
+                    10,
+                ),
+                _article_with_body(
+                    "ds-2",
+                    "公众号乙",
+                    "益生菌菌株临床试验数据发布",
+                    "研发团队完成新一代益生菌菌株临床试验研究数据显示改善肠道健康",
+                    "ds-b",
+                    20,
+                ),
+            ),
+        ),
+    )
+
+    build_demo_topics(database_path)
+
+    assert _independent_source_count(database_path) == 2
+
+
+def test_demo_pipeline_minhash_branch_matches_exact_branch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database_path = tmp_path / "var" / "demo" / "radar.sqlite3"
+    _import_near_dup_fixture(database_path)
+    monkeypatch.setattr(
+        "nutrition_signal_radar.demo_pipeline.MINHASH_SWITCH_THRESHOLD", 2
+    )
+
+    build_demo_topics(database_path)
+
+    assert _independent_source_count(database_path) == 2
