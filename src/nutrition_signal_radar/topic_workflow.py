@@ -685,3 +685,71 @@ def _selection_dimensions(title: str) -> list[str]:
     if any(keyword in title for keyword in ("品牌", "产品", "市场", "销售", "渠道")):
         dimensions.insert(0, "产品与市场动作")
     return list(dict.fromkeys(dimensions))
+
+
+def set_signal_priority(
+    database_path: Path,
+    signal_id: int,
+    priority: int | None,
+    *,
+    actor: str = "operator",
+) -> dict[str, object]:
+    """Set the human ordering override for one signal; None restores rule order.
+
+    Signals with a priority are listed first in the brief and the publishable
+    article prompt, in ascending priority order; unset signals keep their rule
+    score order.  Priority survives rule rebuilds (the deterministic upsert
+    never overwrites the column) and is cleared if the signal disappears.
+    """
+    if priority is not None and priority < 0:
+        raise ValueError("priority must be a non-negative integer or None")
+    initialize_schema(database_path)
+    connection = connect_database(database_path)
+    try:
+        with transaction(connection):
+            row = connection.execute(
+                """
+                SELECT s.id, s.signal_title, tc.cycle_id, mc.status AS cycle_status
+                FROM industry_signals s
+                JOIN topic_clusters tc ON tc.id = s.cluster_id
+                JOIN monitoring_cycles mc ON mc.id = tc.cycle_id
+                WHERE s.id = ?
+                """,
+                (signal_id,),
+            ).fetchone()
+            if row is None:
+                raise TopicWorkflowError(f"行业信号 {signal_id} 不存在")
+            _ensure_cycle_open(row)
+            connection.execute(
+                f"""
+                UPDATE industry_signals SET priority = ?, updated_at = ({SQL_NOW})
+                WHERE id = ?
+                """,
+                (priority, signal_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO monitoring_cycle_events(cycle_id, event_type, actor, payload_json)
+                VALUES (?, 'signal_priority_set', ?, ?)
+                """,
+                (
+                    int(row["cycle_id"]),
+                    (actor or "operator").strip() or "operator",
+                    json.dumps(
+                        {
+                            "signal_id": signal_id,
+                            "priority": priority,
+                            "signal_title": str(row["signal_title"]),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                ),
+            )
+        return {
+            "signal_id": signal_id,
+            "priority": priority,
+            "cycle_id": int(row["cycle_id"]),
+        }
+    finally:
+        connection.close()

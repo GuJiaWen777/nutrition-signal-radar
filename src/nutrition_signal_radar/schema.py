@@ -716,6 +716,17 @@ RESEARCH_SOURCE_MEDIA_TYPE_SCHEMA = Migration(
 )
 
 
+SIGNAL_PRIORITY_SCHEMA = Migration(
+    version=11,
+    name="signal_manual_priority",
+    statements=(
+        """
+        ALTER TABLE industry_signals ADD COLUMN priority INTEGER
+        """,
+    ),
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     INITIAL_SCHEMA,
     DEMO_CLUSTERING_SCHEMA,
@@ -727,6 +738,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     SOURCE_SYNC_AND_WEEKLY_BRIEF_SCHEMA,
     WEEKLY_ARTICLE_SCHEMA,
     RESEARCH_SOURCE_MEDIA_TYPE_SCHEMA,
+    SIGNAL_PRIORITY_SCHEMA,
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
 
