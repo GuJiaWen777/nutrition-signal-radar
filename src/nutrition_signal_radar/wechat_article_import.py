@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -61,12 +62,21 @@ def fetch_wechat_article(
     if not cleaned_url.startswith(("https://", "http://")):
         raise SourceRegistryError("文章链接必须是完整的 HTTP(S) URL")
     active_session = session or Session()
-    response = active_session.get(
-        cleaned_url,
-        headers={"User-Agent": _DEFAULT_USER_AGENT},
-        timeout=timeout,
-    )
-    text = getattr(response, "text", "")
+    try:
+        response = active_session.get(
+            cleaned_url,
+            headers={"User-Agent": _DEFAULT_USER_AGENT},
+            timeout=timeout,
+        )
+        status_code = getattr(response, "status_code", None)
+        if status_code is not None and not 200 <= int(status_code) < 300:
+            raise SourceRegistryError(
+                f"文章页面返回 HTTP {status_code}，未能读取内容"
+            )
+        text = getattr(response, "text", "")
+    finally:
+        if session is None:
+            active_session.close()
     if not text:
         raise SourceRegistryError("未能读取文章页面内容")
     return _parse_wechat_article_html(str(text))
@@ -145,9 +155,10 @@ def import_wechat_article(
             (
                 int(account_row["id"]),
                 (actor or "operator").strip() or "operator",
-                '{"url": %s, "title": %s}' % (
-                    _json_string(normalized_url),
-                    _json_string(title),
+                json.dumps(
+                    {"url": normalized_url, "title": title},
+                    ensure_ascii=False,
+                    sort_keys=True,
                 ),
             ),
         )
@@ -237,9 +248,3 @@ def _normalize_published_at(value: str | None) -> str | None:
         except ValueError:
             continue
     return cleaned
-
-
-def _json_string(value: str) -> str:
-    import json
-
-    return json.dumps(value, ensure_ascii=False)

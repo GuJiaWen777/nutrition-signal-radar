@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
@@ -105,3 +106,35 @@ def external_id_for_article(
         namespace = "content"
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
     return f"{namespace}:{digest}"
+
+
+def normalize_source_type(value: object) -> str:
+    """Map an agent-reported source label onto the research-source vocabulary.
+
+    Labels arrive free-form from the pi agent (“权威媒体+行业媒体转载”, “监管原文”,
+    “company_announcement”).  Strip parenthetical qualifiers and separators first
+    so compound labels resolve to their leading canonical type instead of “other”.
+    """
+
+    cleaned = re.sub(r"[（(].*?[）)]", "", str(value or "").strip())
+    normalized = re.split(r"[+、/|，,]", cleaned)[0].strip().lower()
+    mapping = {
+        "regulator": {
+            "regulator",
+            "regulatory",
+            "监管",
+            "监管原文",
+            "官方公告",
+            "政府",
+            "government",
+        },
+        "research_paper": {"research_paper", "paper", "journal", "论文", "学术", "期刊"},
+        "company_announcement": {"company_announcement", "announcement", "企业公告", "公司公告", "信披"},
+        "market_data": {"market_data", "report", "市场数据", "数据报告", "研报"},
+        "media": {"media", "news", "媒体", "新闻", "权威媒体"},
+        "wechat_discovery": {"wechat_discovery", "wechat", "公众号"},
+    }
+    for canonical, aliases in mapping.items():
+        if normalized in aliases:
+            return canonical
+    return "other"

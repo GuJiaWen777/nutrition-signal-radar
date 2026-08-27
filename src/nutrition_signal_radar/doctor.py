@@ -25,7 +25,7 @@ def build_doctor_report(settings: RadarSettings) -> dict[str, Any]:
     boundary_ok = _is_inside(settings.data_dir, settings.project_root)
     writable_root = _nearest_existing_parent(settings.data_dir)
     writable_ok = writable_root.is_dir() and os.access(writable_root, os.W_OK)
-    codex_path = shutil.which("codex") or shutil.which("codex.exe") or ""
+    pi_path = shutil.which("pi") or shutil.which("pi.exe") or ""
     pytest_available = importlib.util.find_spec("pytest") is not None
     schema_status = inspect_schema(settings.database_path)
 
@@ -65,9 +65,9 @@ def build_doctor_report(settings: RadarSettings) -> dict[str, Any]:
             _llm_summary(settings),
         ),
         DoctorCheck(
-            "codex_cli",
-            "ok" if codex_path else "missing",
-            codex_path or "Codex CLI is not available on PATH",
+            "pi_cli",
+            "ok" if pi_path else "missing",
+            pi_path or "pi coding-agent CLI is not available on PATH",
         ),
         DoctorCheck(
             "pytest",
@@ -85,7 +85,7 @@ def build_doctor_report(settings: RadarSettings) -> dict[str, Any]:
             "scaffold_ready": scaffold_ready,
             "live_redfox_ready": scaffold_ready and settings.redfox_ready,
             "llm_analysis_ready": scaffold_ready and settings.llm_ready,
-            "codex_available": bool(codex_path),
+            "pi_available": bool(pi_path),
             "tests_ready": pytest_available,
         },
     }

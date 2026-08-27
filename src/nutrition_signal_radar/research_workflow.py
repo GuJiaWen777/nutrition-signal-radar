@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from .agent_gateway import AgentRunResult, PiAgentRequest, save_agent_exchange
+from .article_contract import normalize_source_type
 from .database import connect_database, transaction
 from .schema import initialize_schema
 from .source_registry import list_priority_sites
@@ -489,7 +490,13 @@ def run_online_research(
             task = _task_row(connection, task_id=task_id)
             if task is None:
                 raise ResearchWorkflowError(f"研究任务 {task_id} 不存在")
-            if task["status"] != "pending_start":
+            from_status = str(task["status"])
+            # A process death between the first commit and the agent response
+            # can leave a task in ``researching`` forever.  Such a task has no
+            # draft yet, so retrying it is safe and is the documented recovery
+            # path instead of a permanent stuck state.
+            recovering = from_status == "researching"
+            if from_status != "pending_start" and not recovering:
                 raise ResearchWorkflowError("只有已人工确认、待启动的任务可以启动联网研究")
             if task["confirmed_at"] is None:
                 raise ResearchWorkflowError("研究任务书尚未通过人工确认")
@@ -510,11 +517,12 @@ def run_online_research(
                 task_id,
                 "online_research_started",
                 actor=actor,
-                from_status="pending_start",
+                from_status=from_status,
                 to_status="researching",
                 payload={
                     "generator": ONLINE_RESEARCH_GENERATOR,
                     "network_access": True,
+                    "recovered_from_stuck_researching": recovering,
                 },
             )
     finally:
@@ -1254,6 +1262,12 @@ def _normalize_online_research_payload(
     sources = _online_sources(parsed)
     if not sources and isinstance(signals, list):
         sources = _sources_from_signals(signals)
+    # A deep-research draft without a single concrete URL is indistinguishable
+    # from a no-source LLM summary and fails the P2-02 smoke-test criterion.
+    if not any(str(source.get("url") or "").strip() for source in sources):
+        raise ResearchWorkflowError(
+            "研究 Agent 未返回任何带具体 URL 的来源，任务已回退待启动"
+        )
     return {
         "title": title,
         "key_judgment": key_judgment,
@@ -1328,7 +1342,7 @@ def _sources_from_signals(
                     "title": url,
                     "url": url,
                     "publisher": "未命名发布机构",
-                    "source_type": _normalize_source_type(
+                    "source_type": normalize_source_type(
                         str(signal.get("source_type") or "other")
                     ),
                 }
@@ -1390,26 +1404,10 @@ def _online_sources(parsed: Mapping[str, object]) -> list[dict[str, str]]:
                 "title": title[:500] or "未命名来源页面",
                 "url": url,
                 "publisher": str(item.get("publisher") or "未命名发布机构").strip()[:200],
-                "source_type": _normalize_source_type(str(item.get("source_type") or "other")),
+                "source_type": normalize_source_type(str(item.get("source_type") or "other")),
             }
         )
     return cleaned[:80]
-
-
-def _normalize_source_type(value: str) -> str:
-    normalized = str(value or "").strip().lower()
-    mapping = {
-        "regulator": {"regulator", "regulatory", "监管", "监管原文", "官方公告", "政府", "government"},
-        "research_paper": {"research_paper", "paper", "journal", "论文", "学术", "期刊"},
-        "company_announcement": {"company_announcement", "announcement", "企业公告", "公司公告", "信披"},
-        "market_data": {"market_data", "report", "市场数据", "数据报告", "研报"},
-        "media": {"media", "news", "媒体", "新闻", "权威媒体"},
-        "wechat_discovery": {"wechat_discovery", "wechat", "公众号"},
-    }
-    for canonical, aliases in mapping.items():
-        if normalized in aliases:
-            return canonical
-    return "other"
 
 
 def _insert_online_research_draft(

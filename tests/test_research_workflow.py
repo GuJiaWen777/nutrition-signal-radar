@@ -224,6 +224,76 @@ def test_online_research_failure_reverts_task_without_a_draft(tmp_path: Path) ->
     )
 
 
+def test_stuck_researching_task_can_be_retried_without_a_draft(
+    tmp_path: Path,
+) -> None:
+    path, candidate_id, _ = _prepared_database(tmp_path)
+    _select_topic(path, candidate_id)
+    task_id = create_research_task(path, candidate_id).task_id
+    confirm_research_task(path, task_id)
+    # Simulate a process death between the first commit and the agent response.
+    connection = connect_database(path)
+    try:
+        connection.execute(
+            "UPDATE research_tasks SET status = 'researching' WHERE id = ?",
+            (task_id,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    mutation = run_online_research(
+        path, task_id, _FakeOnlineRunner(_successful_online_result())
+    )
+    task = get_research_task(path, task_id=task_id)
+
+    assert mutation.draft_id > 0
+    assert task is not None
+    assert task["status"] == "draft_review"
+    started = next(
+        event for event in task["events"] if event["event_type"] == "online_research_started"
+    )
+    assert started["payload"]["recovered_from_stuck_researching"] is True
+
+
+def test_online_research_rejects_output_without_any_source_url(
+    tmp_path: Path,
+) -> None:
+    path, candidate_id, _ = _prepared_database(tmp_path)
+    _select_topic(path, candidate_id)
+    task_id = create_research_task(path, candidate_id).task_id
+    confirm_research_task(path, task_id)
+    payload = json.loads(ONLINE_JSON)
+    payload["sources"] = [
+        {
+            "claim": "只有标题没有链接的来源",
+            "title": "某页面",
+            "url": "",
+            "publisher": "未知",
+            "source_type": "other",
+        }
+    ]
+    runner = _FakeOnlineRunner(
+        AgentRunResult(
+            status="completed",
+            final_text=json.dumps(payload, ensure_ascii=False),
+            tool_calls=(),
+            event_lines=(),
+            exit_code=0,
+            stderr="",
+        )
+    )
+
+    mutation = run_online_research(path, task_id, runner)
+    task = get_research_task(path, task_id=task_id)
+
+    assert mutation.draft_id == 0
+    assert task is not None
+    assert task["status"] == "pending_start"
+    assert any(event["event_type"] == "online_research_failed" for event in task["events"])
+    assert any("具体 URL" in (event["reason"] or "") for event in task["events"])
+
+
 def test_online_research_rejects_body_with_internal_markers(tmp_path: Path) -> None:
     path, candidate_id, _ = _prepared_database(tmp_path)
     _select_topic(path, candidate_id)

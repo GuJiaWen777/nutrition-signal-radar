@@ -79,7 +79,6 @@ def import_article_batch(database_path: Path, batch: ArticleBatch) -> BatchImpor
                         last_synced_at, last_article_at
                     ) VALUES (?, ?, 'matched', 'healthy', ({SQL_NOW}), ?)
                     ON CONFLICT(name) DO UPDATE SET
-                        validation_status = 'matched',
                         sync_health = 'healthy',
                         last_synced_at = ({SQL_NOW}),
                         last_article_at = CASE

@@ -1,9 +1,13 @@
 from types import SimpleNamespace
 
+import pytest
+
+from nutrition_signal_radar.cli import main
 from nutrition_signal_radar.database import connect_database
-from nutrition_signal_radar.source_registry import configure_source_account
+from nutrition_signal_radar.source_registry import SourceRegistryError, configure_source_account
 from nutrition_signal_radar.wechat_article_import import (
     _parse_wechat_article_html,
+    fetch_wechat_article,
     import_wechat_article,
 )
 
@@ -21,10 +25,13 @@ FIXTURE_HTML = """
 
 
 class _FakeSession:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, status_code: int | None = None) -> None:
         self._text = text
+        self._status_code = status_code
 
     def get(self, url: str, *, headers: dict[str, str], timeout: float):
+        if self._status_code is not None:
+            return SimpleNamespace(text=self._text, status_code=self._status_code)
         return SimpleNamespace(text=self._text)
 
 
@@ -80,3 +87,33 @@ def test_import_wechat_article_requires_configured_source(tmp_path) -> None:
         assert event is not None
     finally:
         connection.close()
+
+
+def test_fetch_wechat_article_rejects_http_error_status() -> None:
+    session = _FakeSession(FIXTURE_HTML, status_code=403)
+
+    with pytest.raises(SourceRegistryError, match="403"):
+        fetch_wechat_article(
+            "https://mp.weixin.qq.com/s/example",
+            session=session,
+        )
+
+
+def test_import_article_cli_requires_live_acknowledgement(tmp_path, capsys) -> None:
+    result = main(
+        [
+            "--project-root",
+            str(tmp_path),
+            "sources",
+            "import-article",
+            "--account",
+            "Bonny营养领航",
+            "--url",
+            "https://mp.weixin.qq.com/s/example",
+        ]
+    )
+
+    assert result == 2
+    captured = capsys.readouterr()
+    assert "live" in captured.err
+    assert not (tmp_path / "var" / "radar.sqlite3").exists()
