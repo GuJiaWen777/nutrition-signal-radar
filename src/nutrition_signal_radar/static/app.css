@@ -217,6 +217,7 @@ main { padding: 34px clamp(24px, 5vw, 72px) 72px; }
 .card-demo-link { color: var(--teal-dark); font-size: 11px; font-weight: 800; text-decoration: none; }
 .card-demo-link:hover { text-decoration: underline; }
 .empty-column { padding: 24px 8px; color: #869591; text-align: center; font-size: 12px; }
+.generation-notice { margin-bottom: 14px; padding: 12px 14px; border: 1px solid #eadcae; border-radius: 12px; color: #6d501b; background: #fffaf0; font-size: 12px; line-height: 1.6; }
 .archive-box { min-width: 100%; margin-top: 16px; padding: 14px 18px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
 .archive-box summary { cursor: pointer; font-weight: 700; }
 .archive-list { display: grid; gap: 8px; margin-top: 12px; }

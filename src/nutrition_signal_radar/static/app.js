@@ -730,6 +730,27 @@ async function renderWeeklyArticleColumn() {
   const deleteButton = document.querySelector("#weeklyArticleDelete");
   const metaLine = document.querySelector("#weeklyArticleMeta");
   const content = document.querySelector("#weeklyArticleContent");
+  const generatingKey = active ? `radar:weeklyArticleGenerating:${active.id}` : "";
+  let generatingSince = generatingKey ? localStorage.getItem(generatingKey) : null;
+  if (generatingSince && summary && summary.created_at && summary.created_at > generatingSince) {
+    // A newer article version exists than the marker time: that generation
+    // already finished, so the stale hint would only confuse.
+    localStorage.removeItem(generatingKey);
+    generatingSince = null;
+  }
+  const generatingNotice = generatingSince
+    ? `<div class="generation-notice">于 ${escapeHtml(formatDateTime(generatingSince))} 发起过一次可发布文章生成，可能仍在后台运行；<button class="text-button" id="weeklyArticleRefreshNotice" type="button">刷新查看结果</button>。</div>`
+    : "";
+  const bindGenerationNotice = () => {
+    if (!generatingSince) return;
+    const refresh = document.querySelector("#weeklyArticleRefreshNotice");
+    if (refresh) {
+      refresh.onclick = async () => {
+        localStorage.removeItem(generatingKey);
+        await renderWeeklyPanel();
+      };
+    }
+  };
   [confirmButton, editButton, downloadButton, deleteButton].forEach((button) => {
     button.hidden = true;
     button.onclick = null;
@@ -738,7 +759,9 @@ async function renderWeeklyArticleColumn() {
     generateButton.hidden = !active;
     metaLine.textContent = "";
     content.innerHTML =
+      generatingNotice +
       '<div class="empty-column">尚未生成可发布文章；点击上方「生成可发布文章」，生成后可直接编辑、导出或删除。</div>';
+    bindGenerationNotice();
     return;
   }
   generateButton.hidden = true;
@@ -768,9 +791,12 @@ async function renderWeeklyArticleColumn() {
       deleteButton.hidden = false;
       deleteButton.onclick = () => deleteWeeklyArticle(article.version);
     }
-    content.innerHTML = article.markdown
-      ? renderBriefMarkdown(article.markdown)
-      : '<div class="empty-column">该版本缺少可读内容。</div>';
+    content.innerHTML =
+      generatingNotice +
+      (article.markdown
+        ? renderBriefMarkdown(article.markdown)
+        : '<div class="empty-column">该版本缺少可读内容。</div>');
+    bindGenerationNotice();
   } catch (error) {
     metaLine.textContent = "";
     content.innerHTML = '<div class="empty-column">读取失败。</div>';
@@ -791,12 +817,19 @@ async function generateWeeklyArticle() {
   const button = document.querySelector("#weeklyArticleAction");
   button.disabled = true;
   button.textContent = "生成中…（请勿关闭）";
+  // Marker survives a page reload or accidental tab close so the operator can
+  // tell that a minutes-long generation may still be running in the backend.
+  const generatingKey = `radar:weeklyArticleGenerating:${active.id}`;
+  localStorage.setItem(generatingKey, new Date().toISOString());
   try {
     const response = await fetch(`/api/cycles/${active.id}/weekly-articles`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ live: true, max_signals: 8 }),
     });
+    // The backend answered, so the generation has finished (or was rejected);
+    // only a network-level failure leaves the marker in place.
+    localStorage.removeItem(generatingKey);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       throw new Error(payload.error || `HTTP ${response.status}`);
@@ -1048,19 +1081,36 @@ function renderBriefMarkdown(markdown) {
   const lines = String(markdown || "").split(/\r?\n/);
   const html = [];
   let bulletBuffer = [];
+  let orderedBuffer = [];
   const flushBullets = () => {
     if (bulletBuffer.length) {
       html.push(`<ul>${bulletBuffer.map((item) => `<li>${inlineMarkdown(item)}</li>`).join("")}</ul>`);
       bulletBuffer = [];
     }
   };
+  const flushOrdered = () => {
+    if (orderedBuffer.length) {
+      html.push(`<ol>${orderedBuffer.map((item) => `<li>${inlineMarkdown(item)}</li>`).join("")}</ol>`);
+      orderedBuffer = [];
+    }
+  };
   for (const rawLine of lines) {
     const line = rawLine.trimEnd();
+    // 「1. 」「2) 」need a following space so decimals like “1.5亿” stay
+    // paragraphs; the Chinese「3、」enumerator never collides with decimals.
+    const orderedMatch = line.match(/^(\d+)(?:[.)] |、\s?)(.*)$/);
     if (/^- /.test(line)) {
+      flushOrdered();
       bulletBuffer.push(line.replace(/^- /, ""));
       continue;
     }
+    if (orderedMatch) {
+      flushBullets();
+      orderedBuffer.push(orderedMatch[2]);
+      continue;
+    }
     flushBullets();
+    flushOrdered();
     if (/^#{1,4} /.test(line)) {
       const level = Math.min(line.match(/^#+/)[0].length + 1, 5);
       html.push(`<h${level}>${inlineMarkdown(line.replace(/^#+\s*/, ""))}</h${level}>`);
@@ -1073,12 +1123,18 @@ function renderBriefMarkdown(markdown) {
     }
   }
   flushBullets();
+  flushOrdered();
   return html.join("");
 }
 
 function inlineMarkdown(text) {
   let html = escapeHtml(text);
-  html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  // Link text may itself contain one level of square brackets, e.g.
+  // “（中营学发[2026]40号）” inside a source title.
+  html = html.replace(
+    /\[((?:[^\[\]]|\[[^\]]*\])+)\]\((https?:\/\/[^)\s]+)\)/g,
+    '<a href="$2" target="_blank" rel="noreferrer">$1</a>',
+  );
   html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   return html;
 }
