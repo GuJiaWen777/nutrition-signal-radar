@@ -13,6 +13,8 @@ verifiable publish date for every selected item.
 from __future__ import annotations
 
 import hashlib
+import html
+import os
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -121,7 +123,14 @@ def fetch_site_source(
     if source.fetch_kind == "rss":
         raw_items, snapshot = _fetch_rss(session, source, raw_dir, current_time)
     elif source.fetch_kind == "html_list":
-        raw_items, snapshot = _fetch_html_list(session, source, raw_dir, current_time, max_items)
+        if _wants_browser_render(source):
+            raw_items, snapshot = _fetch_html_browser(
+                session, source, raw_dir, current_time, max_items
+            )
+        else:
+            raw_items, snapshot = _fetch_html_list(
+                session, source, raw_dir, current_time, max_items
+            )
     elif source.fetch_kind == "api":
         raw_items, snapshot = _fetch_api(session, source, raw_dir, current_time, cutoff, max_items)
     else:
@@ -369,22 +378,110 @@ class _AnchorTextParser(HTMLParser):
             self.buffer += data
 
 
-def _fetch_html_list(
+def _wants_browser_render(source: NewsSource) -> bool:
+    """`parser_config` may opt an html_list source into headless rendering."""
+
+    try:
+        config = json.loads(source.parser_config) if source.parser_config else {}
+    except json.JSONDecodeError:
+        return False
+    render = config.get("render") if isinstance(config, dict) else None
+    if render is not None and str(render).strip().lower() not in ("", "static", "browser"):
+        raise SiteFetchError(
+            f"未知渲染方式 render={render!r}（支持 static / browser）：{source.name}"
+        )
+    return str(render or "").strip().lower() == "browser"
+
+
+def _render_dom_with_browser(source: NewsSource) -> str:
+    """Render the entry URL with a headless browser and return the final DOM.
+
+    Playwright reuses the locally installed Edge/Chrome via its channel
+    mechanism, so no browser download is required.  Proxy behaviour is chosen
+    per source via ``parser_config.proxy``: ``"direct"`` forces a direct
+    connection (domestic sites break when a machine-level proxy client is
+    down), the default inherits the system proxy (required for some foreign
+    sites); ``RADAR_BROWSER_PROXY`` overrides globally.
+    """
+
+    from playwright.sync_api import sync_playwright
+
+    try:
+        config = json.loads(source.parser_config) if source.parser_config else {}
+    except json.JSONDecodeError:
+        config = {}
+    config = config if isinstance(config, dict) else {}
+    wait_seconds = max(0, min(int(config.get("wait_seconds") or 2), 30))
+    wait_selector = str(config.get("wait_selector") or "").strip() or None
+    proxy_mode = str(config.get("proxy") or "").strip().lower()
+
+    launch_kwargs: dict[str, object] = {}
+    if proxy_mode == "direct":
+        launch_kwargs["args"] = ["--no-proxy-server"]
+    elif os.environ.get("RADAR_BROWSER_PROXY", "").strip():
+        launch_kwargs["proxy"] = {"server": os.environ["RADAR_BROWSER_PROXY"].strip()}
+
+    last_error: Exception | None = None
+    with sync_playwright() as playwright:
+        browser = None
+        for channel in ("msedge", "chrome", None):
+            try:
+                browser = playwright.chromium.launch(
+                    channel=channel, headless=True, **launch_kwargs
+                )
+                break
+            except Exception as exc:  # channel not installed — try the next
+                last_error = exc
+        if browser is None:
+            raise SiteFetchError(
+                f"无可用浏览器（msedge/chrome/chromium 均失败）：{last_error}"
+            )
+        try:
+            context = browser.new_context(user_agent=USER_AGENT)
+            page = context.new_page()
+            page.goto(source.entry_url, wait_until="domcontentloaded", timeout=45000)
+            if wait_selector:
+                try:
+                    page.wait_for_selector(wait_selector, timeout=10000)
+                except Exception:
+                    pass  # best effort: parse whatever rendered
+            if wait_seconds:
+                page.wait_for_timeout(wait_seconds * 1000)
+            return page.content()
+        finally:
+            browser.close()
+
+
+def _fetch_html_browser(
     session: HttpSession,
     source: NewsSource,
     raw_dir: Path,
     now: datetime,
     max_items: int,
 ) -> tuple[list[FetchedItem], tuple[Path | None, Path | None, str | None]]:
-    body_text, body, status = _checked_get(session, source.entry_url)
+    try:
+        html_text = _render_dom_with_browser(source)
+    except SiteFetchError:
+        raise
+    except Exception as exc:
+        raise SiteFetchError(f"浏览器渲染失败：{source.entry_url}（{exc}）") from exc
+    body = html_text.encode("utf-8")
     snapshot = _write_snapshot(
         raw_dir, source, now, body,
-        request_url=source.entry_url, method="GET", status_code=status,
+        request_url=source.entry_url, method="BROWSER", status_code=200,
     )
+    items = _items_from_dom(html_text, source, max_items)
+    return items, snapshot
+
+
+def _items_from_dom(
+    html_text: str, source: NewsSource, max_items: int
+) -> list[FetchedItem]:
+    """Shared anchor/date extraction for static and browser-rendered pages."""
 
     parser = _AnchorTextParser()
     try:
-        parser.feed(body_text)
+        parser.feed(html_text)
     except Exception as exc:
         raise SiteFetchError(f"列表页解析失败：{source.entry_url}（{exc}）") from exc
 
@@ -413,10 +510,13 @@ def _fetch_html_list(
         previous_end = int(parser.anchors[index - 1]["end"]) if index > 0 else 0
         next_start = int(parser.anchors[index + 1]["start"]) if index + 1 < len(parser.anchors) else len(parser.buffer)
         # List pages usually print the date after the title; search right
-        # context first so a neighbouring item's date is not adopted.
+        # context first, then left.  Card-style lists often render the date
+        # inside the anchor itself — that is this item's own date, so try it
+        # as the final fallback.
         published = (
             _normalize_publish_time(_find_date(parser.buffer[end:min(next_start, end + _DATE_CONTEXT_CHARS)]))
             or _normalize_publish_time(_find_date(parser.buffer[max(previous_end, start - _DATE_CONTEXT_CHARS):start]))
+            or _normalize_publish_time(_find_date(parser.buffer[start:end]))
         )
         items.append(
             FetchedItem(
@@ -428,6 +528,22 @@ def _fetch_html_list(
         )
         if len(items) >= max_items:
             break
+    return items
+
+
+def _fetch_html_list(
+    session: HttpSession,
+    source: NewsSource,
+    raw_dir: Path,
+    now: datetime,
+    max_items: int,
+) -> tuple[list[FetchedItem], tuple[Path | None, Path | None, str | None]]:
+    body_text, body, status = _checked_get(session, source.entry_url)
+    snapshot = _write_snapshot(
+        raw_dir, source, now, body,
+        request_url=source.entry_url, method="GET", status_code=status,
+    )
+    items = _items_from_dom(body_text, source, max_items)
     return items, snapshot
 
 

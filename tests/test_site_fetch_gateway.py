@@ -17,6 +17,7 @@ from nutrition_signal_radar.news_registry import (
 )
 from nutrition_signal_radar.site_fetch_gateway import (
     SiteFetchError,
+    _render_dom_with_browser,
     fetch_site_source,
 )
 
@@ -41,6 +42,7 @@ def make_source(**overrides):
         last_item_at=None,
         notes="",
         derived_from=None,
+        parser_config="",
     )
     values.update(overrides)
     return values["source"] if "source" in values else _source_dataclass(values)
@@ -437,3 +439,60 @@ def test_news_fetch_cli_requires_live_and_runs_json_when_live(
     assert live_payload["articles_inserted"] == 2
     assert captured["lookback_hours"] == 12
     assert captured["source_names"] == ("测试源",)
+
+
+def test_browser_render_opt_in_dispatches_and_parses(tmp_path: Path, monkeypatch) -> None:
+    from nutrition_signal_radar.site_fetch_gateway import _render_dom_with_browser
+
+    rendered = (
+        "<html><body><ul>"
+        '<li><a href="/news/1">市场监管总局关于保健食品备案管理的公告</a><span>2026-08-30</span></li>'
+        "</ul></body></html>"
+    )
+    monkeypatch.setattr(
+        "nutrition_signal_radar.site_fetch_gateway._render_dom_with_browser",
+        lambda source: rendered,
+    )
+    session = FakeSession()  # browser path must not consume any queued request
+    source = make_source(
+        parser_config='{"render":"browser"}',
+        entry_url="https://www.example.gov.cn/list",
+    )
+
+    batch = fetch_site_source(
+        session=session,
+        source=source,
+        lookback_hours=24,
+        max_items=30,
+        raw_dir=tmp_path,
+        now=NOW,
+    )
+
+    assert [item.title for item in batch.items] == ["市场监管总局关于保健食品备案管理的公告"]
+    assert batch.items[0].url == "https://www.example.gov.cn/news/1"
+    assert batch.raw_body_path is not None and batch.raw_body_path.is_file()
+
+
+def test_browser_render_rejects_unknown_render_option(tmp_path: Path) -> None:
+    source = make_source(parser_config='{"render":"magic"}')
+    with pytest.raises(SiteFetchError, match="未知渲染方式"):
+        fetch_site_source(
+            session=FakeSession(),
+            source=source,
+            lookback_hours=24,
+            max_items=30,
+            raw_dir=tmp_path,
+            now=NOW,
+        )
+
+
+def test_render_dom_with_browser_renders_local_file(tmp_path: Path) -> None:
+    page_file = tmp_path / "page.html"
+    page_file.write_text("<html><body><h1>浏览器渲染测试OK</h1></body></html>", encoding="utf-8")
+    source = make_source(entry_url=page_file.as_uri())
+
+    try:
+        html = _render_dom_with_browser(source)
+    except SiteFetchError as exc:
+        pytest.skip(f"no local browser for playwright: {exc}")
+    assert "浏览器渲染测试OK" in html

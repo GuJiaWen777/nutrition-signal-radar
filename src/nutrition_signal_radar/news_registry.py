@@ -218,7 +218,8 @@ def configure_news_source(
     try:
         with transaction(connection):
             existing = connection.execute(
-                "SELECT id FROM news_sources WHERE domain = ?", (cleaned_domain,)
+                "SELECT id FROM news_sources WHERE domain = ? OR name = ?",
+                (cleaned_domain, cleaned_name),
             ).fetchone()
             if existing is None:
                 cursor = connection.execute(
@@ -248,7 +249,7 @@ def configure_news_source(
                 connection.execute(
                     f"""
                     UPDATE news_sources SET
-                        name = ?, category = ?, entry_url = ?, fetch_kind = ?,
+                        name = ?, domain = ?, category = ?, entry_url = ?, fetch_kind = ?,
                         default_priority = ?, parser_version = ?, parser_config = ?,
                         enabled = ?, notes = ?,
                         updated_at = ({SQL_NOW})
@@ -256,6 +257,7 @@ def configure_news_source(
                     """,
                     (
                         cleaned_name,
+                        cleaned_domain,
                         cleaned_category,
                         cleaned_entry_url,
                         cleaned_fetch_kind,
