@@ -34,7 +34,7 @@ from nutrition_signal_radar.site_fetch_gateway import (  # noqa: E402
 )
 
 _CST = timezone(timedelta(hours=8))
-_NEWSISH = re.compile(r"news|press|media|资讯|新闻|动态|公告|insight|update|announcement", re.I)
+_NEWSISH = re.compile(r"news|press|media|资讯|新闻|动态|公告|insight|update|announcement|investor|投资者|关系", re.I)
 
 
 def main() -> int:
@@ -75,12 +75,18 @@ def main() -> int:
                 seen.add(absolute)
                 candidates.append(absolute)
 
-        best_count = len(_items_from_dom(home_html, source, 50))
+        def dated_count(html: str, entry: str) -> int:
+            return sum(
+                1 for item in _items_from_dom(html, replace(source, entry_url=entry), 50)
+                if item.published_at
+            )
+
+        best_count = dated_count(home_html, source.entry_url)
         best_url = source.entry_url
         for candidate in candidates[:2]:
             try:
                 candidate_html = _render_dom_with_browser(replace(source, entry_url=candidate))
-                count = len(_items_from_dom(candidate_html, replace(source, entry_url=candidate), 50))
+                count = dated_count(candidate_html, candidate)
             except Exception:
                 continue
             if count > best_count:

@@ -18,7 +18,7 @@ import os
 import json
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
@@ -119,6 +119,18 @@ def fetch_site_source(
         raise SiteFetchError("news max_items must be at least 1")
     current_time = _ensure_cst(now) if now is not None else datetime.now(_CST)
     cutoff = current_time - timedelta(hours=lookback_hours)
+
+    # parser_config proxy:"direct" bypasses the machine proxy (which requests
+    # also honours via the Windows registry): domestic sites break when a
+    # system proxy client is down.  Single-threaded pipeline, so mutating the
+    # shared session per source is safe.
+    try:
+        proxy_cfg = json.loads(source.parser_config) if source.parser_config else {}
+    except json.JSONDecodeError:
+        proxy_cfg = {}
+    if isinstance(proxy_cfg, dict) and str(proxy_cfg.get("proxy") or "").lower() == "direct":
+        if session is not None:
+            session.trust_env = False
 
     if source.fetch_kind == "rss":
         raw_items, snapshot = _fetch_rss(session, source, raw_dir, current_time)
@@ -447,6 +459,13 @@ def _render_dom_with_browser(source: NewsSource) -> str:
                     pass  # best effort: parse whatever rendered
             if wait_seconds:
                 page.wait_for_timeout(wait_seconds * 1000)
+            # Trigger lazy-loaded lists: a few short scrolls to the bottom
+            # before snapshotting the DOM.
+            for _ in range(3):
+                page.mouse.wheel(0, 2500)
+                page.wait_for_timeout(400)
+            page.evaluate("window.scrollTo(0, 0)")
+            page.wait_for_timeout(300)
             return page.content()
         finally:
             browser.close()
@@ -459,25 +478,50 @@ def _fetch_html_browser(
     now: datetime,
     max_items: int,
 ) -> tuple[list[FetchedItem], tuple[Path | None, Path | None, str | None]]:
-    try:
-        html_text = _render_dom_with_browser(source)
-    except SiteFetchError:
-        raise
-    except Exception as exc:
-        raise SiteFetchError(f"浏览器渲染失败：{source.entry_url}（{exc}）") from exc
+    def render_once(cfg: str) -> str:
+        try:
+            return _render_dom_with_browser(replace(source, parser_config=cfg))
+        except SiteFetchError:
+            raise
+        except Exception as exc:
+            raise SiteFetchError(f"浏览器渲染失败：{source.entry_url}（{exc}）") from exc
+
+    html_text = render_once(source.parser_config)
+    items = _items_from_dom(html_text, source)
+    # JS sites and CDNs are flaky: some nodes serve a degraded shell without
+    # the dated list.  Re-render (with a longer settle) up to two more times
+    # before declaring the page dateless.  The check must use the same uncapped
+    # parse that feeds the window filter below — a max_items-capped parse can
+    # look dateless purely because navigation links precede the news list.
+    for extra_wait in (4, 8):
+        if items and any(item.published_at for item in items):
+            break
+        try:
+            config = json.loads(source.parser_config) if source.parser_config else {}
+        except json.JSONDecodeError:
+            config = {}
+        config = config if isinstance(config, dict) else {}
+        config["wait_seconds"] = max(6, int(config.get("wait_seconds") or 2) + extra_wait)
+        html_text = render_once(json.dumps(config, ensure_ascii=False))
+        items = _items_from_dom(html_text, source)
+
     body = html_text.encode("utf-8")
     snapshot = _write_snapshot(
         raw_dir, source, now, body,
         request_url=source.entry_url, method="BROWSER", status_code=200,
     )
-    items = _items_from_dom(html_text, source, max_items)
     return items, snapshot
 
 
 def _items_from_dom(
-    html_text: str, source: NewsSource, max_items: int
+    html_text: str, source: NewsSource, scan_cap: int = 200
 ) -> list[FetchedItem]:
-    """Shared anchor/date extraction for static and browser-rendered pages."""
+    """Shared anchor/date extraction for static and browser-rendered pages.
+
+    ``scan_cap`` bounds the candidate scan (navigation links often precede the
+    news list); the caller caps the *kept* items after window filtering, so
+    this cap must not truncate early candidates.
+    """
 
     parser = _AnchorTextParser()
     try:
@@ -526,7 +570,7 @@ def _items_from_dom(
                 summary="",
             )
         )
-        if len(items) >= max_items:
+        if len(items) >= scan_cap:
             break
     return items
 
@@ -543,7 +587,7 @@ def _fetch_html_list(
         raw_dir, source, now, body,
         request_url=source.entry_url, method="GET", status_code=status,
     )
-    items = _items_from_dom(body_text, source, max_items)
+    items = _items_from_dom(body_text, source)
     return items, snapshot
 
 
