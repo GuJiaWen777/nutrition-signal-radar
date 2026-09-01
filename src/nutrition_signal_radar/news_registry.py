@@ -198,10 +198,15 @@ def configure_news_source(
     parser_version: str = "v1",
     parser_config: str = "",
     notes: str = "",
-    enabled: bool = False,
+    enabled: bool | None = None,
     actor: str = "operator",
 ) -> NewsSource:
-    """Create or edit one whitelist entry; it stays disabled unless explicitly enabled."""
+    """Create or edit one whitelist entry.
+
+    ``enabled`` is tri-state: ``None`` keeps the current state on update
+    (defaults to disabled on create), so a routine reconfiguration can never
+    silently pause an enabled source.
+    """
 
     cleaned_name = _clean_required(name, "信源名称")
     cleaned_domain = _clean_domain(domain)
@@ -238,7 +243,7 @@ def configure_news_source(
                         cleaned_priority,
                         cleaned_parser_version,
                         cleaned_parser_config,
-                        int(enabled),
+                        int(bool(enabled)),
                         cleaned_notes,
                     ),
                 )
@@ -251,7 +256,7 @@ def configure_news_source(
                     UPDATE news_sources SET
                         name = ?, domain = ?, category = ?, entry_url = ?, fetch_kind = ?,
                         default_priority = ?, parser_version = ?, parser_config = ?,
-                        enabled = ?, notes = ?,
+                        enabled = COALESCE(?, enabled), notes = ?,
                         updated_at = ({SQL_NOW})
                     WHERE id = ?
                     """,
@@ -264,7 +269,7 @@ def configure_news_source(
                         cleaned_priority,
                         cleaned_parser_version,
                         cleaned_parser_config,
-                        int(enabled),
+                        None if enabled is None else int(enabled),
                         cleaned_notes,
                         source_id,
                     ),

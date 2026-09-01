@@ -353,8 +353,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     news_configure.add_argument("--notes", help="Optional operator notes.")
     news_configure.add_argument(
         "--enabled",
-        action="store_true",
-        help="Explicitly enable after operator confirmation of this whitelist entry.",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Explicitly enable/disable; omit to keep the current state on update.",
     )
     news_configure.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     news_enable = news_commands.add_parser(
