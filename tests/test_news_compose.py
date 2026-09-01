@@ -310,7 +310,7 @@ def test_news_build_cli_gates_and_live_path(tmp_path: Path, capsys, monkeypatch)
     assert Path(built["detail"]).is_dir()
 
 
-def test_build_title_strips_markers_and_truncates_at_boundary():
+def test_build_title_strips_markers_and_keeps_full_title_within_limit():
     from nutrition_signal_radar.news_compose import ComposedItem, _build_title
 
     item = ComposedItem(
@@ -320,7 +320,8 @@ def test_build_title_strips_markers_and_truncates_at_boundary():
     )
     title = _build_title("daily", [item])
 
-    assert title == "营养健康行业资讯｜关于召开“2026年海洋食品安全与营养健康学术会议”"
+    # 33 字焦点 ≤ 40 上限：完整保留不截断
+    assert title == "营养健康行业资讯｜关于召开“2026年海洋食品安全与营养健康学术会议”的通知（第二轮）"
     assert "【" not in title and "分会 |" not in title
 
     short = ComposedItem(
@@ -464,3 +465,74 @@ def test_build_dedupes_same_cms_id_then_backfills(tmp_path: Path) -> None:
     assert markdown.count("182630200") == 1
     assert "备案管理新规" in markdown
     assert "功能目录" in markdown
+
+
+def test_over_limit_title_uses_model_rewrite_with_mechanical_fallback(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """超长标题优先请模型压缩改写；模型失败时机械截断（省略号）兜底。"""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+    _enable(
+        database_path,
+        name="测试监管网",
+        domain="example.gov.cn",
+        category="policy",
+        entry_url="https://www.example.gov.cn/feed.xml",
+        fetch_kind="rss",
+        default_priority="P0",
+    )
+    stamp = (NOW - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    titles = [
+        "新京报：开店更快，北京食品经营许可新规一年惠及1.2万余家经营主体准入退出机制进一步完善并明确配套细则与办事指南",
+        "市场监管总局通报保健食品虚假宣传典型案例处罚结果",
+        "中国营养学会发布膳食营养新研究共识",
+    ]
+    articles = tuple(
+        NormalizedArticle(
+            external_id=external_id_for_article(
+                url=f"https://www.example.gov.cn/a/{i}",
+                account_name="测试监管网", title=title,
+                published_at=stamp, content_hash=None,
+            ),
+            account_name="测试监管网", title=title, published_at=stamp,
+            url=f"https://www.example.gov.cn/a/{i}",
+            content_snapshot="保健食品监管新规正式发布，明确准入与退出机制。",
+            content_hash=None,
+        )
+        for i, title in enumerate(titles, start=1)
+    )
+    import_article_batch(
+        database_path,
+        ArticleBatch(source_kind="news", source_path="direct",
+                     source_fingerprint="direct-title-test", source_rows=3,
+                     articles=articles, account_segment="news_source"),
+    )
+    report = evaluate_pending_news_articles(database_path)
+    assert report.selected == 3
+
+    import nutrition_signal_radar.news_compose as compose
+
+    monkeypatch.setattr(
+        compose, "_rewrite_title_with_model",
+        lambda gw, title, limit: "北京食品经营许可新规实施一年惠及万余家主体",
+    )
+    built = compose.build_news_article(
+        database_path, FakeComposeGateway(lambda _prompt: _valid_payload()),
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        llm_model="deepseek-chat", now=NOW,
+    )
+    assert built.status == "built"
+    assert built.title == "营养健康行业资讯｜北京食品经营许可新规实施一年惠及万余家主体"
+    manifest = json.loads((Path(built.detail) / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["title_provenance"] == "model_rewrite"
+
+    monkeypatch.setattr(compose, "_rewrite_title_with_model", lambda gw, title, limit: None)
+    fallback = compose.build_news_article(
+        database_path, FakeComposeGateway(lambda _prompt: _valid_payload()),
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        llm_model="deepseek-chat", now=NOW,
+    )
+    assert fallback.status == "built"
+    assert fallback.title.endswith("…")

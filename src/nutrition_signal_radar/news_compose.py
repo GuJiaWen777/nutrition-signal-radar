@@ -37,6 +37,15 @@ _CST = timezone(timedelta(hours=8), name="Asia/Shanghai")
 SQL_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 _MIN_ITEMS_TO_BUILD = 2
 _MIN_ITEMS_FOR_DAILY = 3
+# 焦点标题软上限（系列前缀之外）：超限时优先请模型压缩改写，机械截断兜底。
+_TITLE_SOFT_LIMIT = 40
+_TITLE_REWRITE_SYSTEM_PROMPT = (
+    "你是微信公众号资讯标题编辑。只对给定原标题做压缩改写："
+    "不得新增任何事实、数字、机构或产品名，不得改变原意，"
+    "不得使用夸张、疾病治疗类表述或省略号。"
+    '输出 JSON 对象：{"title": "改写后的标题"}。'
+)
+_MIN_ITEMS_FOR_DAILY = 3
 _TARGET_ITEMS = 5
 _WEEKLY_LOOKBACK_DAYS = 7
 _SUMMARY_MIN_CHARS = 100
@@ -191,6 +200,20 @@ def build_news_article(
         slug = f"news-weekly-{(current_time - timedelta(days=6)):%Y%m%d}"
 
     title = _build_title(mode, composed)
+    title_provenance = "mechanical"
+    if mode == "daily" and len(composed) and len(_focus_from_title(composed[0].title)) > _TITLE_SOFT_LIMIT:
+        # Over-limit headline: prefer a model compression of the original
+        # (no new facts allowed), mechanical truncation stays the fallback.
+        rewritten = _rewrite_title_with_model(gateway, composed[0].title, _TITLE_SOFT_LIMIT)
+        if rewritten:
+            title = _build_title(mode, composed, focus=rewritten)
+            title_provenance = "model_rewrite"
+        else:
+            title = _build_title(
+                mode, composed,
+                focus=_mechanical_truncate(_focus_from_title(composed[0].title), _TITLE_SOFT_LIMIT),
+            )
+            title_provenance = "mechanical_truncated"
     article = _ArticleDocument(
         mode=mode, title=title, items=composed, generated_at=current_time
     )
@@ -210,6 +233,7 @@ def build_news_article(
         html_text=html_text,
         qc=qc,
         llm_model=llm_model,
+        title_provenance=title_provenance,
         logo_path=logo_path,
         generated_at=current_time,
         actor=actor,
@@ -429,14 +453,61 @@ class _ArticleDocument:
     generated_at: datetime
 
 
-def _build_title(mode: str, composed: list[ComposedItem]) -> str:
+def _mechanical_truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    for i in range(len(cut), int(limit * 0.5), -1):
+        if cut[i - 1] in "”》）」，、；：":
+            return cut[:i]
+    # No closing punctuation to break on: never slice inside a number, and
+    # mark the hard truncation with an ellipsis.
+    trimmed = re.sub(r"(?:\d+[.])?\d+$", "", cut).rstrip("，、；：,; ")
+    return (trimmed + "…") if trimmed else cut + "…"
+
+
+def _rewrite_title_with_model(
+    gateway, original_title: str, limit: int
+) -> str | None:
+    """Ask the analysis backend to compress an over-limit headline.
+
+    The model only sees the original headline and must keep every fact;
+    malformed, over-limit, or red-line-violating answers are rejected here so
+    the mechanical truncation remains the last resort.
+    """
+
+    user_prompt = (
+        f"原标题（{len(original_title)}字）：{original_title}\n"
+        f"请改写为不超过 {limit} 字的标题，输出 JSON。"
+    )
+    for _ in range(2):
+        try:
+            result = gateway.analyze(_TITLE_REWRITE_SYSTEM_PROMPT, user_prompt, json_object=True)
+        except Exception:
+            return None
+        try:
+            payload = json.loads(result.content)
+        except json.JSONDecodeError:
+            continue
+        title = str(payload.get("title") or "").strip() if isinstance(payload, dict) else ""
+        if not 8 <= len(title) <= limit:
+            continue
+        if any(marker in title for marker in _INTERNAL_MARKERS) or _contains_forbidden(title):
+            continue
+        return title
+    return None
+
+
+def _build_title(
+    mode: str, composed: list[ComposedItem], *, focus: str | None = None
+) -> str:
     if mode == "weekly":
         return "本周营养健康行业资讯｜政策、财报与展会动态一览"
-    focus = _focus_from_title(composed[0].title)
-    return f"营养健康行业资讯｜{focus}"
+    base = focus if focus else _focus_from_title(composed[0].title)
+    return f"营养健康行业资讯｜{base}"
 
 
-def _focus_from_title(title: str, limit: int = 26) -> str:
+def _focus_from_title(title: str, limit: int = 40) -> str:
     """Derive the article-title focus from the top item's headline.
 
     Strips editorial markers (【2026-08-31】-style repost prefixes), prefers
@@ -454,11 +525,7 @@ def _focus_from_title(title: str, limit: int = 26) -> str:
     cleaned = cleaned.strip()
     if len(cleaned) <= limit:
         return cleaned
-    cut = cleaned[:limit]
-    for i in range(len(cut), int(limit * 0.5), -1):
-        if cut[i - 1] in "”》）」，、；：":
-            return cut[:i]
-    return cut.rstrip("（“「")
+    return _mechanical_truncate(cleaned, limit)
 
 
 def _grouped_sections(items: list[ComposedItem]) -> list[tuple[str, list[ComposedItem]]]:
@@ -659,6 +726,7 @@ def _write_build(
     html_text: str,
     qc: dict[str, object],
     llm_model: str,
+    title_provenance: str,
     logo_path: Path | None,
     generated_at: datetime,
     actor: str,
@@ -694,6 +762,7 @@ def _write_build(
                 "version": version,
                 "mode": mode,
                 "title": title,
+                "title_provenance": title_provenance,
                 "llm_model": llm_model,
                 "items": [item.__dict__ for item in composed],
                 "excluded_items": excluded,
