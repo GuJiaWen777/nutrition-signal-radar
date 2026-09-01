@@ -367,7 +367,11 @@ def _canonical_url_key(url: str) -> str:
 
 
 def _normalize_title(title: str) -> str:
-    cleaned = unicodedata.normalize("NFKC", str(title or ""))
+    cleaned = unicodedata.normalize("NFKC", str(title or "")).strip()
+    # 【2026-08-31】-style editorial prefixes and leading dates are repost
+    # markers, not part of the headline for similarity purposes.
+    cleaned = re.sub(r"^(【[^】]*】|\[[^\]]*\])\s*", "", cleaned)
+    cleaned = re.sub(r"^\d{4}[-./年]\d{1,2}([-./月]\d{1,2}日?)?\s*", "", cleaned)
     return re.sub(r"[\s\W_]+", "", cleaned).lower()
 
 

@@ -307,3 +307,24 @@ def test_news_build_cli_gates_and_live_path(tmp_path: Path, capsys, monkeypatch)
     assert built["mode"] == "daily"
     assert built["item_count"] == 4
     assert Path(built["detail"]).is_dir()
+
+
+def test_build_title_strips_markers_and_truncates_at_boundary():
+    from nutrition_signal_radar.news_compose import ComposedItem, _build_title
+
+    item = ComposedItem(
+        article_id=1, source_name="中国营养学会", section="expo", priority="P2",
+        title="【2026-08-31】分会 | 关于召开“2026年海洋食品安全与营养健康学术会议”的通知（第二轮）",
+        url=None, published_at=None, summary="", implication="", keywords=(),
+    )
+    title = _build_title("daily", [item])
+
+    assert title == "营养健康行业资讯｜关于召开“2026年海洋食品安全与营养健康学术会议”"
+    assert "【" not in title and "分会 |" not in title
+
+    short = ComposedItem(
+        article_id=2, source_name="测试源", section="policy", priority="P0",
+        title="保健食品备案新规发布", url=None, published_at=None,
+        summary="", implication="", keywords=(),
+    )
+    assert _build_title("daily", [short]) == "营养健康行业资讯｜保健食品备案新规发布"

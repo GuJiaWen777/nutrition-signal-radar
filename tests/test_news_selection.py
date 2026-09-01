@@ -237,3 +237,42 @@ def test_news_selection_cli_select_and_list_items(tmp_path: Path, capsys) -> Non
     assert human_code == 0
     assert "[P0|政策监管]" in human_output
     assert "selected" in human_output
+
+
+def test_selection_catches_date_prefixed_repost_variants(tmp_path: Path) -> None:
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+    _enable(
+        database_path,
+        name="测试监管网",
+        domain="example.gov.cn",
+        category="policy",
+        entry_url="https://www.example.gov.cn/feed.xml",
+        fetch_kind="rss",
+        default_priority="P0",
+    )
+    recent = (NOW - timedelta(hours=1)).astimezone(CST)
+    base_title = "关于召开2026年海洋食品安全与营养健康学术会议的通知（第二轮）"
+    feed = f"""<?xml version="1.0"?>
+    <rss version="2.0"><channel><title>t</title>
+      <item><title>{base_title}</title>
+        <link>https://www.example.gov.cn/a/1</link>
+        <pubDate>Mon, {recent:%d %b %Y} 08:00:00 +0800</pubDate>
+        <description>海洋食品安全与营养健康学术会议第二轮通知。</description></item>
+      <item><title>【2026-08-31】分会 | {base_title}</title>
+        <link>https://www.example.gov.cn/a/2</link>
+        <pubDate>Mon, {recent:%d %b %Y} 09:00:00 +0800</pubDate>
+        <description>带日期前缀的同稿转载不应重复入选。</description></item>
+    </channel></rss>"""
+    _ingest_rss(database_path, feed, entry_url="https://www.example.gov.cn/feed.xml", name="测试监管网")
+
+    report = evaluate_pending_news_articles(database_path)
+
+    assert report.selected == 1
+    assert report.rejection_counts.get("duplicate_title") == 1
+    items = {item.title: item for item in list_news_items(database_path)}
+    duplicate = next(
+        item for item in items.values() if item.title.startswith("【2026-08-31】")
+    )
+    assert duplicate.selected is False
+    assert duplicate.rejection_reasons[0]["code"] == "duplicate_title"

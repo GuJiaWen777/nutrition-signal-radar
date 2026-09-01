@@ -328,12 +328,33 @@ class _ArticleDocument:
 def _build_title(mode: str, composed: list[ComposedItem]) -> str:
     if mode == "weekly":
         return "本周营养健康行业资讯｜政策、财报与展会动态一览"
-    focus = _normalize_title_text(composed[0].title)[:24]
+    focus = _focus_from_title(composed[0].title)
     return f"营养健康行业资讯｜{focus}"
 
 
-def _normalize_title_text(title: str) -> str:
-    return re.sub(r"\s+", "", str(title or "")).strip()
+def _focus_from_title(title: str, limit: int = 26) -> str:
+    """Derive the article-title focus from the top item's headline.
+
+    Strips editorial markers (【2026-08-31】-style repost prefixes), prefers
+    the last "|"-separated segment (site section prefixes like "分会 | "), and
+    truncates at a closing punctuation boundary instead of mid-phrase.
+    """
+
+    cleaned = str(title or "").strip()
+    cleaned = re.sub(r"^(【[^】]*】|\[[^\]]*\])\s*", "", cleaned)
+    parts = re.split(r"\s*[｜|]\s*", cleaned)
+    if len(parts) > 1:
+        tail = parts[-1].strip()
+        if len(tail) >= max(8, limit // 2):
+            cleaned = tail
+    cleaned = cleaned.strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    cut = cleaned[:limit]
+    for i in range(len(cut), int(limit * 0.5), -1):
+        if cut[i - 1] in "”》）」，、；：":
+            return cut[:i]
+    return cut.rstrip("（“「")
 
 
 def _grouped_sections(items: list[ComposedItem]) -> list[tuple[str, list[ComposedItem]]]:
