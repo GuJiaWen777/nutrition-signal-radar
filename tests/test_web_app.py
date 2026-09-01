@@ -46,28 +46,6 @@ def _database(tmp_path: Path) -> Path:
     return path
 
 
-def test_local_demo_serves_concise_wechat_article_preview(tmp_path: Path) -> None:
-    path = _database(tmp_path)
-    server = create_demo_server(path, port=0)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        with urlopen(
-            f"http://127.0.0.1:{server.server_port}/topic-article-demo.html",
-            timeout=5,
-        ) as response:
-            html = response.read().decode("utf-8")
-        assert response.status == 200
-        assert "注册检验必须使用工艺验证批次吗" in html
-        assert "排版与内容结构 Demo" in html
-        assert "本页面不可直接发布" in html
-        assert "一手来源待补证" in html
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-
-
 def test_static_workspace_groups_detailed_states_into_simple_display_stages() -> None:
     static_root = (
         Path(__file__).resolve().parents[1]

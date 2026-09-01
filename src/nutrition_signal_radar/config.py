@@ -78,22 +78,6 @@ class RadarSettings:
         """Store desensitized news-line site responses in local runtime state."""
         return self.data_dir / "raw" / "sites"
 
-    @property
-    def we_mprss_pilot_database_path(self) -> Path:
-        """Keep local WeRSS pilot data separate from the Excel demo and formal DB."""
-        return self.data_dir / "we-mp-rss-pilot" / "radar.sqlite3"
-
-    @property
-    def native_we_mprss_database_path(self) -> Path:
-        """Default local database for the isolated native WeRSS runtime."""
-        return (
-            self.data_dir
-            / "native-we-mp-rss-runtime"
-            / "source"
-            / "data"
-            / "we_mp_rss.db"
-        )
-
 
 def load_settings(
     project_root: Path | None = None,

@@ -81,12 +81,6 @@ from .weekly_service import (
 )
 from .wechat_article_import import import_wechat_article
 from .web_app import run_demo_server, run_radar_server
-from .we_mprss_gateway import (
-    DEFAULT_TRACKED_ACCOUNTS,
-    WeMpRssImportError,
-    load_we_mprss_batch,
-    validate_we_mprss_source,
-)
 from .xlsx_gateway import XlsxImportError, load_xlsx_batch
 
 
@@ -127,46 +121,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     demo_serve.add_argument("--port", type=int, default=8765, help="Local port (default: 8765).")
     demo_serve.add_argument("--open", action="store_true", help="Open the board in the default browser.")
-
-    we_mprss = commands.add_parser(
-        "we-mp-rss",
-        help="Validate and import articles from the isolated local we-mp-rss runtime.",
-    )
-    we_mprss_commands = we_mprss.add_subparsers(dest="we_mprss_command", required=True)
-    we_mprss_validate = we_mprss_commands.add_parser(
-        "validate", help="Read the local source DB and report coverage for the tracked accounts."
-    )
-    we_mprss_validate.add_argument(
-        "--source-db", type=Path, help="Read-only we-mp-rss SQLite path (defaults to the native pilot DB)."
-    )
-    we_mprss_validate.add_argument(
-        "--account", action="append", dest="accounts", help="Tracked account name; repeat to override the five defaults."
-    )
-    we_mprss_validate.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
-    we_mprss_import = we_mprss_commands.add_parser(
-        "import", help="Import a validated local source DB into the isolated WeRSS pilot board."
-    )
-    we_mprss_import.add_argument(
-        "--source-db", type=Path, help="Read-only we-mp-rss SQLite path (defaults to the native pilot DB)."
-    )
-    we_mprss_import.add_argument(
-        "--account", action="append", dest="accounts", help="Tracked account name; repeat to override the five defaults."
-    )
-    we_mprss_import.add_argument(
-        "--allow-partial", action="store_true", help="Allow import when one or more requested accounts have not synced yet."
-    )
-    we_mprss_import.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
-    we_mprss_build = we_mprss_commands.add_parser(
-        "build", help="Aggregate imported WeRSS articles into explainable rule-based pilot signals."
-    )
-    we_mprss_build.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
-    we_mprss_serve = we_mprss_commands.add_parser(
-        "serve", help="Serve the isolated local WeRSS pilot board on 127.0.0.1."
-    )
-    we_mprss_serve.add_argument("--port", type=int, default=8766, help="Local port (default: 8766).")
-    we_mprss_serve.add_argument("--open", action="store_true", help="Open the board in the default browser.")
-
     redfox = commands.add_parser(
+
         "redfox",
         help="Run explicitly authorized, read-only RedFox source validation.",
     )
@@ -1927,124 +1883,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         # in the JSON report before deciding whether to begin formal sync.
         return 0
 
-    if args.command == "we-mp-rss":
-        source_database = (args.source_db or settings.native_we_mprss_database_path).resolve() if args.we_mprss_command in {"validate", "import"} else None
-        accounts = tuple(args.accounts or DEFAULT_TRACKED_ACCOUNTS) if args.we_mprss_command in {"validate", "import"} else ()
-
-        if args.we_mprss_command == "validate":
-            try:
-                report = validate_we_mprss_source(source_database, accounts=accounts)
-            except WeMpRssImportError as exc:
-                print(f"WeRSS validation failed: {exc}", file=sys.stderr)
-                return 1
-            payload = report.as_dict()
-            if args.json:
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
-            else:
-                print(f"Read-only WeRSS source: {payload['source_path']}")
-                print(
-                    f"Matched accounts: {payload['matched_accounts']}/{len(report.requested_accounts)}; "
-                    f"eligible articles: {payload['source_article_count']}"
-                )
-                for health in report.accounts:
-                    print(
-                        f"- {health.account_name}: {health.status}; {health.article_count} articles; "
-                        f"body coverage {health.body_coverage:.0%}; {health.message}"
-                    )
-            return 0 if report.ready_for_import else 1
-
-        if args.we_mprss_command == "import":
-            try:
-                report = validate_we_mprss_source(source_database, accounts=accounts)
-                if not report.ready_for_import and not args.allow_partial:
-                    print(
-                        "WeRSS import stopped: all requested accounts must be matched and synced first; "
-                        "run `we-mp-rss validate` or pass --allow-partial for an explicit partial pilot.",
-                        file=sys.stderr,
-                    )
-                    return 1
-                batch = load_we_mprss_batch(source_database, accounts=accounts)
-                if not batch.articles:
-                    print("WeRSS import stopped: no eligible articles were found.", file=sys.stderr)
-                    return 1
-                result = import_article_batch(settings.we_mprss_pilot_database_path, batch)
-            except WeMpRssImportError as exc:
-                print(f"WeRSS import failed: {exc}", file=sys.stderr)
-                return 1
-            payload = {
-                "database_path": str(result.database_path),
-                "cycle_id": result.cycle_id,
-                "cycle_slug": result.cycle_slug,
-                "source_path": result.source_path,
-                "source_fingerprint": result.source_fingerprint,
-                "source_rows": result.source_rows,
-                "normalized_articles": result.normalized_articles,
-                "collapsed_rows": result.collapsed_rows,
-                "skipped_rows": result.skipped_rows,
-                "accounts_created": result.accounts_created,
-                "articles_inserted": result.articles_inserted,
-                "articles_updated": result.articles_updated,
-                "total_accounts": result.total_accounts,
-                "total_articles": result.total_articles,
-                "in_period_articles": result.in_period_articles,
-                "context_articles": result.context_articles,
-                "validation": report.as_dict(),
-            }
-            if args.json:
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
-            else:
-                print(f"WeRSS pilot database: {result.database_path}")
-                print(
-                    f"Articles: {result.total_articles} total "
-                    f"({result.articles_inserted} inserted, {result.articles_updated} updated)"
-                )
-            return 0
-
-        if args.we_mprss_command == "build":
-            try:
-                result = build_demo_topics(settings.we_mprss_pilot_database_path)
-            except ValueError as exc:
-                print(f"WeRSS pilot build failed: {exc}", file=sys.stderr)
-                return 1
-            payload = {
-                "database_path": str(result.database_path),
-                "cycle_id": result.cycle_id,
-                "cycle_slug": result.cycle_slug,
-                "source_articles": result.source_articles,
-                "clusters": result.clusters,
-                "multi_article_clusters": result.multi_article_clusters,
-                "signals": result.signals,
-                "candidates": result.candidates,
-                "locked_clusters_preserved": result.locked_clusters_preserved,
-                "stale_clusters_removed": result.stale_clusters_removed,
-                "generator": result.generator,
-            }
-            if args.json:
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
-            else:
-                print(
-                    f"WeRSS pilot: {result.source_articles} articles; {result.clusters} clusters; "
-                    f"{result.candidates} topic candidates."
-                )
-                print("Generator: deterministic rules only; no LLM call.")
-            return 0
-
-        if args.we_mprss_command == "serve":
-            if not 1 <= args.port <= 65535:
-                print("WeRSS pilot server port must be between 1 and 65535", file=sys.stderr)
-                return 1
-            try:
-                run_demo_server(
-                    settings.we_mprss_pilot_database_path,
-                    port=args.port,
-                    open_browser=args.open,
-                )
-            except (FileNotFoundError, OSError) as exc:
-                print(f"WeRSS pilot server failed: {exc}", file=sys.stderr)
-                return 1
-            return 0
-
-    return 2
 
 
 def _configure_console_output() -> None:

@@ -562,12 +562,6 @@ function topicCard(candidate) {
       <div class="source-label">${candidate.source_count} 个号 / 独立估算 ${candidate.independent_source_count}</div>
       <div class="risk-line">⚑ ${escapeHtml(firstRisk)}</div>
       <div class="topic-next-step">下一步：${escapeHtml(topicNextStep(candidate.status))}</div>
-      ${candidate.article_demo_url ? `
-        <div class="card-action-row">
-          <span>已选题结构样稿</span>
-          <a class="card-demo-link" href="${escapeAttribute(candidate.article_demo_url)}" target="_blank" rel="noreferrer" data-article-demo>查看文章 Demo</a>
-        </div>
-      ` : ""}
     </article>
   `;
 }
@@ -1372,28 +1366,15 @@ function detailHtml(detail) {
 function researchHandoffHtml(detail) {
   const candidate = detail.candidate;
   const task = detail.research_task;
-  const articleDemo = detail.article_demo_url
-    ? `
-      <div class="article-demo-callout">
-        <div>
-          <strong>文章结构 Demo</strong>
-          <span>仅展示微信公众号文章的篇幅与排版，不是深度研究产出，事实仍待补证。</span>
-        </div>
-        <a class="secondary-button button-link" href="${escapeAttribute(detail.article_demo_url)}" target="_blank" rel="noreferrer" data-article-demo>查看文章 Demo</a>
-      </div>
-    `
-    : "";
 
   if (candidate.status !== "selected") {
     return `
       <p class="muted">选题包经人工确认进入“已选题”后，才可生成独立研究任务书。</p>
-      ${articleDemo}
     `;
   }
 
   if (!task) {
     return `
-      ${articleDemo}
       <div class="research-gate-card">
         <div>
           <span class="eyebrow">HUMAN GATE</span>
@@ -1411,7 +1392,6 @@ function researchHandoffHtml(detail) {
   const statusHint = researchProgressHint(task.status);
   if (task.editable) {
     return `
-      ${articleDemo}
       <div class="package-status-line">
         <span class="status-chip">${statusLabel}</span>
         <span class="muted">任务 #${task.id} · ${statusHint}</span>
@@ -1459,7 +1439,6 @@ function researchHandoffHtml(detail) {
   `;
   if (task.status === "pending_start") {
     return `
-      ${articleDemo}
       <div class="package-status-line"><span class="status-chip">${statusLabel}</span><span class="muted">任务 #${task.id} · ${statusHint}</span></div>
       <div class="readiness-box is-ready"><strong>任务书已人工确认</strong><span>可生成不联网的离线文章 Demo，或经确认后调用 pi 联网生成可发布文章；两者都不会自动发布。</span></div>
       ${taskFields}
@@ -1473,7 +1452,6 @@ function researchHandoffHtml(detail) {
     ? `<button class="secondary-button" type="button" data-open-research-task="${task.id}">查看研究与稿件</button>`
     : "";
   return `
-    ${articleDemo}
     <div class="package-status-line">
       <span class="status-chip">${statusLabel}</span>
       <span class="muted">任务 #${task.id} · ${statusHint}</span>

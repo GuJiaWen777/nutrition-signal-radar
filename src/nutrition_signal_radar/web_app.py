@@ -79,8 +79,6 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
-    "/topic-article-demo.html": ("topic-article-demo.html", "text/html; charset=utf-8"),
-    "/topic-article-demo.css": ("topic-article-demo.css", "text/css; charset=utf-8"),
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
@@ -1380,10 +1378,6 @@ def _candidate_payload(database_path: Path, candidate_id: int) -> dict[str, Any]
             "research_task": get_research_task(
                 database_path, candidate_id=candidate_id
             ),
-            "article_demo_url": _article_demo_url(
-                candidate,
-                package_title=package["title"] if package else None,
-            ),
             "articles": articles,
             "events": events,
             "allowed_transitions": (
@@ -1399,31 +1393,9 @@ def _candidate_payload(database_path: Path, candidate_id: int) -> dict[str, Any]
 def _candidate_summary(row: sqlite3.Row) -> dict[str, Any]:
     payload = dict(row)
     payload["risk_flags"] = _json_value(payload.pop("risk_flags_json"), [])
-    payload["article_demo_url"] = _article_demo_url(
-        payload,
-        package_title=payload.get("package_title"),
-    )
     return payload
 
 
-def _article_demo_url(
-    candidate: Mapping[str, Any] | dict[str, Any],
-    *,
-    package_title: str | None = None,
-) -> str | None:
-    if candidate.get("status") != "selected":
-        return None
-    title = " ".join(
-        value
-        for value in (
-            str(package_title or "").strip(),
-            str(candidate.get("proposed_title") or "").strip(),
-        )
-        if value
-    )
-    if "注册检验" in title and "工艺验证批次" in title:
-        return "/topic-article-demo.html"
-    return None
 
 
 def _signal_summary(row: sqlite3.Row) -> dict[str, Any]:

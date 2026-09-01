@@ -166,7 +166,7 @@ def test_demo_pipeline_prefers_regulatory_analysis_over_event_promotion(
     import_article_batch(
         database_path,
         ArticleBatch(
-            source_kind="we-mp-rss",
+            source_kind="xlsx",
             source_path="http://127.0.0.1:8001",
             source_fingerprint="probiotic-representative-fingerprint",
             source_rows=3,
@@ -283,7 +283,7 @@ def test_demo_pipeline_groups_specific_industry_topic_across_different_angles(
     import_article_batch(
         database_path,
         ArticleBatch(
-            source_kind="we-mp-rss",
+            source_kind="xlsx",
             source_path="http://127.0.0.1:8001",
             source_fingerprint="specific-topic-fingerprint",
             source_rows=2,
@@ -338,7 +338,7 @@ def test_demo_pipeline_does_not_group_on_generic_health_words(tmp_path: Path) ->
     import_article_batch(
         database_path,
         ArticleBatch(
-            source_kind="we-mp-rss",
+            source_kind="xlsx",
             source_path="http://127.0.0.1:8001",
             source_fingerprint="generic-topic-fingerprint",
             source_rows=2,

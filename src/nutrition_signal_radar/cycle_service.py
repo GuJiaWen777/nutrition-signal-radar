@@ -234,12 +234,6 @@ def ensure_import_cycle(
     if source_kind == "xlsx":
         slug = f"demo-{month}"
         label = f"Demo {month}"
-    elif source_kind == "we-mp-rss":
-        # The first connector run often contains deliberately selected seed
-        # articles from different dates.  Name it as a source pilot so the UI
-        # never presents that span as a real weekly/monthly monitoring issue.
-        slug = f"we-rss-pilot-{month}"
-        label = "WeRSS 五号接入试验（跨日期样本）"
     else:
         slug = f"cycle-{month}"
         label = f"监测期次 {month}"

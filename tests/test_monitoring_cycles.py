@@ -161,37 +161,6 @@ def test_closed_cycle_is_read_only_and_next_cycle_stays_isolated(tmp_path: Path)
         connection.close()
 
 
-def test_first_we_mprss_import_is_named_as_cross_date_source_pilot(
-    tmp_path: Path,
-) -> None:
-    database_path = tmp_path / "var" / "we-mp-rss-pilot" / "radar.sqlite3"
-    result = import_article_batch(
-        database_path,
-        ArticleBatch(
-            source_kind="we-mp-rss",
-            source_path="D:/we-mp-rss/database.db",
-            source_fingerprint="we-rss-pilot",
-            source_rows=2,
-            articles=(
-                _article("old", "公众号甲", "2024-03-24T08:00:00+08:00"),
-                _article("new", "公众号乙", "2026-08-12T08:00:00+08:00"),
-            ),
-        ),
-    )
-
-    assert result.cycle_slug == "we-rss-pilot-2024-03"
-    connection = connect_database(database_path, readonly=True)
-    try:
-        cycle = connection.execute(
-            "SELECT label, start_date, end_date FROM monitoring_cycles"
-        ).fetchone()
-        assert cycle["label"] == "WeRSS 五号接入试验（跨日期样本）"
-        assert cycle["start_date"] == "2024-03-24"
-        assert cycle["end_date"] == "2026-08-12"
-    finally:
-        connection.close()
-
-
 def test_markdown_archive_is_versioned_and_never_overwrites(tmp_path: Path) -> None:
     database_path, cycle_id, candidate_id = _cycle_with_candidate(tmp_path)
     transition_candidate(database_path, candidate_id, "pending_decision")
