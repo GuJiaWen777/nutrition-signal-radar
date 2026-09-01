@@ -57,40 +57,62 @@ def _enable(database_path: Path, **kwargs) -> None:
     set_news_source_enabled(database_path, name=kwargs["name"], enabled=True)
 
 
+_TEST_SOURCES = (
+    ("测试监管网", "example.gov.cn", "policy", "https://www.example.gov.cn/feed.xml", "P0"),
+    ("测试品牌源", "example-brand.com", "brand", "https://www.example-brand.com/feed.xml", "P1"),
+    ("测试展会源", "example-expo.com", "expo", "https://www.example-expo.com/feed.xml", "P2"),
+)
+
+
+def _enable_test_sources(database_path: Path) -> None:
+    seed_news_sources(database_path)
+    for name, domain, category, entry, priority in _TEST_SOURCES:
+        _enable(
+            database_path,
+            name=name,
+            domain=domain,
+            category=category,
+            entry_url=entry,
+            fetch_kind="rss",
+            default_priority=priority,
+        )
+
+
 def _seed_four_selected_items(database_path: Path, *, base: datetime | None = None) -> None:
+    """四条入选分布三类信源（监管 2 / 品牌 1 / 展会 1），满足每源上限 2。"""
+
     base = base or NOW
     seed_news_sources(database_path)
-    _enable(
-        database_path,
-        name="测试监管网",
-        domain="example.gov.cn",
-        category="policy",
-        entry_url="https://www.example.gov.cn/feed.xml",
-        fetch_kind="rss",
-        default_priority="P0",
-    )
-    item = "  <item><title>{title}</title><link>{link}</link><pubDate>{date}</pubDate>"
-    item += "<description>{summary}</description></item>"
-    entries = []
-    for offset, (title, link, summary) in enumerate(
-        [
+    _enable_test_sources(database_path)
+    feeds = {
+        "https://www.example.gov.cn/feed.xml": [
             ("市场监管总局就保健食品原料目录公开征求意见", "https://www.example.gov.cn/a/1", "保健食品原料目录征求意见，规范注册备案。"),
             ("监管部门通报保健食品虚假宣传典型案例处罚结果", "https://www.example.gov.cn/a/2", "通报多起虚假宣传处罚，涉及保健食品宣传红线。"),
+        ],
+        "https://www.example-brand.com/feed.xml": [
             ("汤臣倍健发布半年度财报业绩稳健增长", "https://www.example-brand.com/news/1", "公司披露半年度财报，营养健康业务稳健增长。"),
+        ],
+        "https://www.example-expo.com/feed.xml": [
             ("NHNE健康营养博览会今日开幕", "https://www.example-expo.com/news/1", "博览会开幕，保健食品与特医食品板块亮相。"),
-        ]
-    ):
-        published = (base - timedelta(hours=1 + offset)).strftime("%a, %d %b %Y %H:%M:%S +0800")
-        entries.append(
-            item.format(title=title, link=link, date=published, summary=summary)
-        )
-    feed = (
-        '<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>'
-        + "".join(entries)
-        + "</channel></rss>"
-    )
+        ],
+    }
     session = FakeSession()
-    session.queue("https://www.example.gov.cn/feed.xml", FakeResponse(feed))
+    for feed_url, items in feeds.items():
+        item_tpl = "  <item><title>{title}</title><link>{link}</link><pubDate>{date}</pubDate><description>{summary}</description></item>"
+        entries = "".join(
+            item_tpl.format(
+                title=title, link=link, summary=summary,
+                date=(base - timedelta(hours=1 + offset)).strftime("%a, %d %b %Y %H:%M:%S +0800"),
+            )
+            for offset, (title, link, summary) in enumerate(items)
+        )
+        feed_xml = (
+            '<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>'
+            + entries
+            + "</channel></rss>"
+        )
+        session.queue(feed_url, FakeResponse(feed_xml))
+
     from nutrition_signal_radar.news_fetch_service import fetch_enabled_news_sources
 
     fetch_result = fetch_enabled_news_sources(
@@ -335,33 +357,37 @@ def test_build_title_strips_markers_and_keeps_full_title_within_limit():
 def _import_policy_articles(
     database_path: Path, entries: list[tuple[str, str, datetime]]
 ) -> None:
+    """条目按序轮转挂到两个政策源，天然满足每源 2 条的多样性上限。"""
+
     seed_news_sources(database_path)
-    _enable(
-        database_path,
-        name="测试监管网",
-        domain="example.gov.cn",
-        category="policy",
-        entry_url="https://www.example.gov.cn/feed.xml",
-        fetch_kind="rss",
-        default_priority="P0",
-    )
+    for name, domain in (("测试监管网", "example.gov.cn"), ("测试市监局", "example2.gov.cn")):
+        _enable(
+            database_path,
+            name=name,
+            domain=domain,
+            category="policy",
+            entry_url=f"https://www.{domain}/feed.xml",
+            fetch_kind="rss",
+            default_priority="P0",
+        )
+    accounts = ("测试监管网", "测试市监局")
     articles = tuple(
         NormalizedArticle(
             external_id=external_id_for_article(
                 url=link,
-                account_name="测试监管网",
+                account_name=accounts[index % len(accounts)],
                 title=title,
                 published_at=published.strftime("%Y-%m-%d %H:%M:%S"),
                 content_hash=None,
             ),
-            account_name="测试监管网",
+            account_name=accounts[index % len(accounts)],
             title=title,
             published_at=published.strftime("%Y-%m-%d %H:%M:%S"),
             url=link,
             content_snapshot="保健食品监管动态与行业合规要求说明，现发布相关通知。",
             content_hash=None,
         )
-        for title, link, published in entries
+        for index, (title, link, published) in enumerate(entries)
     )
     import_article_batch(
         database_path,
@@ -483,6 +509,15 @@ def test_over_limit_title_uses_model_rewrite_with_mechanical_fallback(
         fetch_kind="rss",
         default_priority="P0",
     )
+    _enable(
+        database_path,
+        name="测试品牌源",
+        domain="example-brand.com",
+        category="brand",
+        entry_url="https://www.example-brand.com/feed.xml",
+        fetch_kind="rss",
+        default_priority="P1",
+    )
     stamp = (NOW - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
     titles = [
         "新京报：开店更快，北京食品经营许可新规一年惠及1.2万余家经营主体准入退出机制进一步完善并明确配套细则与办事指南",
@@ -496,7 +531,10 @@ def test_over_limit_title_uses_model_rewrite_with_mechanical_fallback(
                 account_name="测试监管网", title=title,
                 published_at=stamp, content_hash=None,
             ),
-            account_name="测试监管网", title=title, published_at=stamp,
+            account_name=(
+                "测试监管网" if i <= 2 else "测试品牌源"
+            ),
+            title=title, published_at=stamp,
             url=f"https://www.example.gov.cn/a/{i}",
             content_snapshot="保健食品监管新规正式发布，明确准入与退出机制。",
             content_hash=None,

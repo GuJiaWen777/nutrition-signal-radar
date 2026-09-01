@@ -36,6 +36,8 @@ from .schema import initialize_schema
 _CST = timezone(timedelta(hours=8), name="Asia/Shanghai")
 SQL_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 _MIN_ITEMS_TO_BUILD = 2
+# 单篇内同一信源最多入选条数：避免单一来源霸版，保证来源多样性。
+_MAX_ITEMS_PER_SOURCE = 2
 _MIN_ITEMS_FOR_DAILY = 3
 # 焦点标题软上限（系列前缀之外）：超限时优先请模型压缩改写，机械截断兜底。
 _TITLE_SOFT_LIMIT = 40
@@ -270,6 +272,24 @@ def _load_selected_items(
         connection.close()
 
 
+def _cap_per_source(
+    items: list[dict[str, object]], max_items: int
+) -> list[dict[str, object]]:
+    """同一信源最多入选 _MAX_ITEMS_PER_SOURCE 条，保证来源多样性。"""
+
+    per_source: dict[str, int] = {}
+    kept: list[dict[str, object]] = []
+    for item in items:
+        key = str(item.get("source_name") or "")
+        if per_source.get(key, 0) >= _MAX_ITEMS_PER_SOURCE:
+            continue
+        per_source[key] = per_source.get(key, 0) + 1
+        kept.append(item)
+        if len(kept) >= max_items:
+            break
+    return kept
+
+
 def _choose_item_pool(
     daily_items: list[dict[str, object]],
     weekly_items: list[dict[str, object]],
@@ -278,13 +298,13 @@ def _choose_item_pool(
     """Pick daily vs weekly pool: backfill today's thin set from the 7-day window."""
 
     if len(daily_items) >= _MIN_ITEMS_FOR_DAILY:
-        return "daily", _sort_news_items(daily_items)[:max_items]
+        return "daily", _cap_per_source(_sort_news_items(daily_items), max_items)
     if daily_items:
         filled = _backfill_daily(daily_items, weekly_items, max_items)
         if len(filled) >= _MIN_ITEMS_FOR_DAILY:
-            return "daily", filled
+            return "daily", _cap_per_source(filled, max_items)
     if len(weekly_items) >= _MIN_ITEMS_TO_BUILD:
-        return "weekly", _sort_news_items(weekly_items)[:max_items]
+        return "weekly", _cap_per_source(_sort_news_items(weekly_items), max_items)
     return "skip", weekly_items or daily_items
 
 
