@@ -145,11 +145,15 @@ def _render_with_browser(
     date_text: str,
     logo_path: Path | None,
 ) -> None:
-    with tempfile.TemporaryDirectory(prefix="news-cover-") as profile_dir:
-        html_path = output_path.with_suffix(".html")
-        render_cover_html(
-            html_path, article_title=article_title, date_text=date_text, logo_path=logo_path
-        )
+    html_path = output_path.with_suffix(".html")
+    render_cover_html(
+        html_path, article_title=article_title, date_text=date_text, logo_path=logo_path
+    )
+    # Edge intermittently exits 0 without writing the screenshot (observed on
+    # busy machines); retry with a fresh profile before falling back to PIL.
+    last_error = "no attempt"
+    for _attempt in range(3):
+        profile_dir = tempfile.mkdtemp(prefix="news-cover-")
         command = [
             str(browser),
             "--headless",
@@ -163,13 +167,21 @@ def _render_with_browser(
             f"--window-size={COVER_WIDTH},{COVER_HEIGHT}",
             html_path.resolve().as_uri(),
         ]
-        completed = subprocess.run(
-            command, capture_output=True, timeout=120, check=False
-        )
-        if completed.returncode != 0 or not output_path.is_file():
-            raise NewsCoverError(
-                f"browser screenshot failed (exit={completed.returncode})"
+        try:
+            completed = subprocess.run(
+                command, capture_output=True, timeout=120, check=False
             )
+            last_error = (
+                f"exit={completed.returncode} "
+                f"stderr={completed.stderr.decode('utf-8', 'ignore')[:200]}"
+            )
+        except subprocess.TimeoutExpired as exc:
+            last_error = f"timeout: {exc}"
+        if output_path.is_file():
+            break
+        shutil.rmtree(profile_dir, ignore_errors=True)
+    if not output_path.is_file():
+        raise NewsCoverError(f"browser screenshot failed ({last_error})")
 
 
 # ---------------------------------------------------------------------------

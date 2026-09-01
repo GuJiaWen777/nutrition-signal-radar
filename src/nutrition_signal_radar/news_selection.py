@@ -18,6 +18,7 @@ import sqlite3
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .article_contract import canonicalize_article_url
 from .database import connect_database, transaction
@@ -42,6 +43,9 @@ _REJECTION_CODES = {
 }
 _TITLE_NEAR_DUP_THRESHOLD = 0.92
 _MIN_TITLE_LENGTH = 6
+# Last path segment like /notice/182630200.html is treated as the same CMS
+# article even when the section prefix differs.
+_NUMERIC_PATH_ID = re.compile(r"^(\d{6,})(?:\.html?)?$", re.IGNORECASE)
 
 INDUSTRY_TERMS: tuple[str, ...] = (
     "保健食品", "特殊食品", "特医食品", "特殊医学用途", "特殊膳食", "特膳",
@@ -143,9 +147,9 @@ class NewsSelectionReport:
 
     @property
     def daily_eligible(self) -> bool:
-        """The daily article only runs when at least two items are selected."""
+        """A daily article needs at least three selected items (docx: 3–5)."""
 
-        return self.selected >= 2
+        return self.selected >= 3
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -206,7 +210,7 @@ def evaluate_pending_news_articles(database_path: Path) -> NewsSelectionReport:
                 if decision.selected:
                     prior["titles"].append(_normalize_title(decision.title))
                     if decision.url:
-                        prior["urls"].add(_canonical_url_key(decision.url))
+                        prior["url_keys"] |= set(url_identity_keys(decision.url))
                 decisions.append(decision)
     finally:
         connection.close()
@@ -286,9 +290,15 @@ def _decide(row: sqlite3.Row, prior: dict[str, object]) -> NewsItemDecision:
     )
     if not relevant:
         reasons.append({"code": "not_relevant", "detail": "未命中营养健康产业相关词，与产业不直接相关"})
-    if url and _canonical_url_key(url) in prior["urls"]:  # type: ignore[operator]
-        reasons.append({"code": "duplicate_url", "detail": "同一原文链接已入选"})
-    elif title and _is_near_duplicate(title, prior["titles"]):  # type: ignore[arg-type]
+    duplicate_code = is_same_news_event(
+        title,
+        url,
+        prior_titles=prior["titles"],  # type: ignore[arg-type]
+        prior_url_keys=prior["url_keys"],  # type: ignore[arg-type]
+    )
+    if duplicate_code == "duplicate_url":
+        reasons.append({"code": "duplicate_url", "detail": "同一原文链接或同一站点文章编号已入选"})
+    elif duplicate_code == "duplicate_title":
         reasons.append({"code": "duplicate_title", "detail": "标题与近期已入选条目近似重复"})
     if not _contains_any(haystack, ACTION_TERMS):
         reasons.append({"code": "no_action_info", "detail": "没有明确的政策动作、公司动作或会议信息"})
@@ -350,19 +360,61 @@ def _load_recent_selected_index(connection: sqlite3.Connection) -> dict[str, obj
     rows = connection.execute(
         "SELECT title, url FROM news_items WHERE selected = 1 ORDER BY id DESC LIMIT 500"
     ).fetchall()
+    url_keys: set[str] = set()
+    for row in rows:
+        if row["url"]:
+            url_keys |= set(url_identity_keys(str(row["url"])))
     return {
         "titles": [_normalize_title(str(row["title"])) for row in rows],
-        "urls": {
-            _canonical_url_key(str(row["url"]))
-            for row in rows
-            if row["url"]
-        },
+        "url_keys": url_keys,
     }
 
 
 def _contains_any(haystack: str, terms: tuple[str, ...]) -> bool:
     lowered = haystack.lower()
     return any(term.lower() in lowered for term in terms)
+
+
+def url_identity_keys(url: str) -> frozenset[str]:
+    """Stable identity keys for one news URL.
+
+    Includes the canonical URL and, when the last path segment is a 6+ digit
+    CMS id (``/notice/182630200.html``), a host+id key so the same article
+    listed under a different section path is still treated as one event.
+    """
+
+    canonical = canonicalize_article_url(url) or url.strip()
+    keys = {_canonical_url_key(url)}
+    parsed = urlsplit(canonical)
+    host = (parsed.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    last = parsed.path.rstrip("/").rsplit("/", 1)[-1] if parsed.path else ""
+    match = _NUMERIC_PATH_ID.match(last)
+    if host and match:
+        keys.add(f"{host}#id:{match.group(1)}")
+    return frozenset(keys)
+
+
+def is_same_news_event(
+    title: str,
+    url: str | None,
+    *,
+    prior_titles: list[str],
+    prior_url_keys: set[str],
+) -> str | None:
+    """Return ``duplicate_url`` / ``duplicate_title`` when this item collides."""
+
+    if url:
+        if url_identity_keys(url) & prior_url_keys:
+            return "duplicate_url"
+    if title and _is_near_duplicate(title, prior_titles):
+        return "duplicate_title"
+    return None
+
+
+def normalize_news_title(title: str) -> str:
+    return _normalize_title(title)
 
 
 def _canonical_url_key(url: str) -> str:
@@ -418,6 +470,9 @@ __all__ = [
     "NewsSelectionError",
     "NewsSelectionReport",
     "evaluate_pending_news_articles",
+    "is_same_news_event",
     "list_news_items",
+    "normalize_news_title",
     "section_label",
+    "url_identity_keys",
 ]

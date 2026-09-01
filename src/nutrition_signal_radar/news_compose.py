@@ -24,14 +24,21 @@ from typing import Protocol
 from .database import connect_database, transaction
 from .llm_gateway import LlmAnalysisResult
 from .news_cover import render_news_cover
-from .news_selection import section_label
+from .news_selection import (
+    is_same_news_event,
+    normalize_news_title,
+    section_label,
+    url_identity_keys,
+)
 from .schema import initialize_schema
 
 
 _CST = timezone(timedelta(hours=8), name="Asia/Shanghai")
 SQL_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
-_MIN_ITEMS_FOR_DAILY = 2
+_MIN_ITEMS_TO_BUILD = 2
+_MIN_ITEMS_FOR_DAILY = 3
 _TARGET_ITEMS = 5
+_WEEKLY_LOOKBACK_DAYS = 7
 _SUMMARY_MIN_CHARS = 100
 _SUMMARY_MAX_CHARS = 220
 _IMPLICATION_MAX_CHARS = 120
@@ -135,33 +142,40 @@ def build_news_article(
         raise NewsComposeError("max_items must be between 1 and 10")
     current_time = _ensure_cst(now) if now is not None else datetime.now(_CST)
 
-    daily_items = _load_selected_items(database_path, current_time - timedelta(hours=lookback_hours))
-    mode = "daily"
-    slug = f"news-{current_time:%Y-%m-%d}"
-    if len(daily_items) < _MIN_ITEMS_FOR_DAILY:
-        mode = "weekly"
-        slug = f"news-weekly-{(current_time - timedelta(days=6)):%Y%m%d}"
-        weekly_items = _load_selected_items(
-            database_path, current_time - timedelta(days=7)
+    daily_items, daily_dupes = _dedupe_items(
+        _load_selected_items(database_path, current_time - timedelta(hours=lookback_hours))
+    )
+    weekly_items, weekly_dupes = _dedupe_items(
+        _load_selected_items(
+            database_path, current_time - timedelta(days=_WEEKLY_LOOKBACK_DAYS)
         )
-        items = weekly_items
-    else:
-        items = daily_items
-    if len(items) < _MIN_ITEMS_FOR_DAILY:
+    )
+    mode, items = _choose_item_pool(daily_items, weekly_items, max_items)
+    slug = (
+        f"news-{current_time:%Y-%m-%d}"
+        if mode == "daily"
+        else f"news-weekly-{(current_time - timedelta(days=6)):%Y%m%d}"
+    )
+    if mode == "skip" or len(items) < _MIN_ITEMS_TO_BUILD:
         return NewsBuildResult(
             status="skipped",
-            slug=slug,
+            slug=slug if mode != "skip" else f"news-{current_time:%Y-%m-%d}",
             version=0,
-            mode=mode,
+            mode="weekly" if mode == "skip" else mode,
             title="",
             item_count=len(items),
-            detail=f"入选条目不足 {_MIN_ITEMS_FOR_DAILY} 条，按需求不强行生成低价值文章",
+            detail=f"去重后入选条目不足 {_MIN_ITEMS_TO_BUILD} 条，按需求不强行生成低价值文章",
             files=(),
         )
-    items = items[:max_items]
 
     composed, excluded = _compose_items(gateway, items)
-    if len(composed) < _MIN_ITEMS_FOR_DAILY:
+    seen_dupe_ids = {row["article_id"] for row in excluded}
+    for dupe in (*daily_dupes, *weekly_dupes):
+        if dupe["article_id"] in seen_dupe_ids:
+            continue
+        excluded.append(dupe)
+        seen_dupe_ids.add(dupe["article_id"])
+    if len(composed) < _MIN_ITEMS_TO_BUILD:
         return NewsBuildResult(
             status="skipped",
             slug=slug,
@@ -172,6 +186,9 @@ def build_news_article(
             detail="通过摘要契约的条目不足 2 条，不生成文章（详见 QC 日志）",
             files=(),
         )
+    if mode == "daily" and len(composed) < _MIN_ITEMS_FOR_DAILY:
+        mode = "weekly"
+        slug = f"news-weekly-{(current_time - timedelta(days=6)):%Y%m%d}"
 
     title = _build_title(mode, composed)
     article = _ArticleDocument(
@@ -227,6 +244,93 @@ def _load_selected_items(
         return [dict(row) for row in rows]
     finally:
         connection.close()
+
+
+def _choose_item_pool(
+    daily_items: list[dict[str, object]],
+    weekly_items: list[dict[str, object]],
+    max_items: int,
+) -> tuple[str, list[dict[str, object]]]:
+    """Pick daily vs weekly pool: backfill today's thin set from the 7-day window."""
+
+    if len(daily_items) >= _MIN_ITEMS_FOR_DAILY:
+        return "daily", _sort_news_items(daily_items)[:max_items]
+    if daily_items:
+        filled = _backfill_daily(daily_items, weekly_items, max_items)
+        if len(filled) >= _MIN_ITEMS_FOR_DAILY:
+            return "daily", filled
+    if len(weekly_items) >= _MIN_ITEMS_TO_BUILD:
+        return "weekly", _sort_news_items(weekly_items)[:max_items]
+    return "skip", weekly_items or daily_items
+
+
+def _backfill_daily(
+    daily_items: list[dict[str, object]],
+    weekly_items: list[dict[str, object]],
+    max_items: int,
+) -> list[dict[str, object]]:
+    filled = list(daily_items)
+    seen_ids = {item["article_id"] for item in filled}
+    titles = [normalize_news_title(str(item.get("title") or "")) for item in filled]
+    url_keys: set[str] = set()
+    for item in filled:
+        url = str(item.get("url") or "").strip()
+        if url:
+            url_keys |= set(url_identity_keys(url))
+    for item in weekly_items:
+        if len(filled) >= max_items:
+            break
+        if item["article_id"] in seen_ids:
+            continue
+        title = str(item.get("title") or "")
+        url = str(item.get("url") or "").strip() or None
+        if is_same_news_event(title, url, prior_titles=titles, prior_url_keys=url_keys):
+            continue
+        filled.append(item)
+        seen_ids.add(item["article_id"])
+        titles.append(normalize_news_title(title))
+        if url:
+            url_keys |= set(url_identity_keys(url))
+    return _sort_news_items(filled)[:max_items]
+
+
+def _sort_news_items(items: list[dict[str, object]]) -> list[dict[str, object]]:
+    rank = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+    by_date = sorted(
+        items, key=lambda item: str(item.get("published_at") or ""), reverse=True
+    )
+    return sorted(
+        by_date, key=lambda item: rank.get(str(item.get("priority") or ""), 9)
+    )
+
+
+def _dedupe_items(
+    items: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, str]]]:
+    kept: list[dict[str, object]] = []
+    dropped: list[dict[str, str]] = []
+    titles: list[str] = []
+    url_keys: set[str] = set()
+    for item in items:
+        title = str(item.get("title") or "")
+        url = str(item.get("url") or "").strip() or None
+        code = is_same_news_event(
+            title, url, prior_titles=titles, prior_url_keys=url_keys
+        )
+        if code:
+            dropped.append(
+                {
+                    "article_id": str(item["article_id"]),
+                    "title": title,
+                    "reason": "同事件近重复，已从文章剔除",
+                }
+            )
+            continue
+        kept.append(item)
+        titles.append(normalize_news_title(title))
+        if url:
+            url_keys |= set(url_identity_keys(url))
+    return kept, dropped
 
 
 def _compose_items(
@@ -522,8 +626,11 @@ def _quality_checks(
     body_text = re.sub(r"[#>*\[\]()！！?？\s]", "", markdown)
     found_forbidden = sorted({term for term in _FORBIDDEN_TERMS if term in body_text})
     article_checks = [
-        {"check": "item_count", "passed": 3 <= len(composed) <= 5,
-         "detail": f"{len(composed)} 条（需求建议 3–5 条）"},
+        {"check": "item_count",
+         "passed": (
+             3 <= len(composed) <= 5 if mode == "daily" else 2 <= len(composed) <= 5
+         ),
+         "detail": f"{len(composed)} 条（日报 3–5 条，周报至少 2 条）"},
         {"check": "total_length", "passed": 1000 <= text_length <= 1800 or mode == "weekly",
          "detail": f"正文约 {text_length} 字（需求建议 1000–1800 字）"},
         {"check": "no_forbidden_terms", "passed": not found_forbidden,

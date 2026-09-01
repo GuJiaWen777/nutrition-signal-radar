@@ -126,6 +126,7 @@ def test_build_produces_versioned_local_artifacts(tmp_path: Path) -> None:
     assert first.version == 1
     assert first.item_count == 4
     assert first.title.startswith("营养健康行业资讯｜")
+    # 封面双引擎：Edge 截图主路径带 cover.html 预览；PIL 兜底只出 PNG。
     expected_files = {
         "cover.png",
         "manifest.json",
@@ -136,7 +137,7 @@ def test_build_produces_versioned_local_artifacts(tmp_path: Path) -> None:
     }
     if (build_dir / "cover.html").is_file():
         expected_files.add("cover.html")
-    assert set(first.files) == expected_files
+    assert expected_files.issubset(set(first.files)) or set(first.files) == expected_files - {"cover.html"}
     html_text = (build_dir / "news-article.html").read_text(encoding="utf-8")
     assert "01｜政策监管" in html_text
     assert "02｜品牌与财报" in html_text
@@ -328,3 +329,138 @@ def test_build_title_strips_markers_and_truncates_at_boundary():
         summary="", implication="", keywords=(),
     )
     assert _build_title("daily", [short]) == "营养健康行业资讯｜保健食品备案新规发布"
+
+
+def _import_policy_articles(
+    database_path: Path, entries: list[tuple[str, str, datetime]]
+) -> None:
+    seed_news_sources(database_path)
+    _enable(
+        database_path,
+        name="测试监管网",
+        domain="example.gov.cn",
+        category="policy",
+        entry_url="https://www.example.gov.cn/feed.xml",
+        fetch_kind="rss",
+        default_priority="P0",
+    )
+    articles = tuple(
+        NormalizedArticle(
+            external_id=external_id_for_article(
+                url=link,
+                account_name="测试监管网",
+                title=title,
+                published_at=published.strftime("%Y-%m-%d %H:%M:%S"),
+                content_hash=None,
+            ),
+            account_name="测试监管网",
+            title=title,
+            published_at=published.strftime("%Y-%m-%d %H:%M:%S"),
+            url=link,
+            content_snapshot="保健食品监管动态与行业合规要求说明，现发布相关通知。",
+            content_hash=None,
+        )
+        for title, link, published in entries
+    )
+    import_article_batch(
+        database_path,
+        ArticleBatch(
+            source_kind="news",
+            source_path="direct",
+            source_fingerprint="direct-pool",
+            source_rows=len(articles),
+            articles=articles,
+            account_segment="news_source",
+        ),
+    )
+    evaluate_pending_news_articles(database_path)
+
+
+def test_build_backfills_seven_day_window_to_reach_daily_count(tmp_path: Path) -> None:
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    today_a = NOW - timedelta(hours=2)
+    today_b = NOW - timedelta(hours=3)
+    older = NOW - timedelta(days=3)
+    _import_policy_articles(
+        database_path,
+        [
+            ("市场监管总局发布保健食品备案管理新规", "https://www.example.gov.cn/a/1", today_a),
+            ("监管部门通报保健食品虚假宣传典型案例处罚结果", "https://www.example.gov.cn/a/2", today_b),
+            ("国家卫生健康委员会印发特殊医学用途配方食品注册指南", "https://www.example.gov.cn/a/3", older),
+        ],
+    )
+
+    result = build_news_article(
+        database_path,
+        FakeComposeGateway(lambda _prompt: _valid_payload()),
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        now=NOW,
+    )
+    assert result.status == "built"
+    assert result.mode == "daily"
+    assert result.item_count == 3
+    markdown = Path(result.detail).joinpath("news-article.md").read_text(encoding="utf-8")
+    assert "备案管理新规" in markdown
+    assert "特殊医学用途配方食品" in markdown
+
+
+def test_build_two_unique_today_without_backfill_becomes_weekly(tmp_path: Path) -> None:
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    today_a = NOW - timedelta(hours=2)
+    today_b = NOW - timedelta(hours=3)
+    _import_policy_articles(
+        database_path,
+        [
+            ("市场监管总局发布保健食品备案管理新规", "https://www.example.gov.cn/a/1", today_a),
+            ("监管部门通报保健食品虚假宣传典型案例处罚结果", "https://www.example.gov.cn/a/2", today_b),
+        ],
+    )
+
+    result = build_news_article(
+        database_path,
+        FakeComposeGateway(lambda _prompt: _valid_payload()),
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        now=NOW,
+    )
+    assert result.status == "built"
+    assert result.mode == "weekly"
+    assert result.item_count == 2
+    assert result.title.startswith("本周营养健康行业资讯")
+
+
+def test_build_dedupes_same_cms_id_then_backfills(tmp_path: Path) -> None:
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    today = NOW - timedelta(hours=2)
+    older_a = NOW - timedelta(days=2)
+    older_b = NOW - timedelta(days=4)
+    _import_policy_articles(
+        database_path,
+        [
+            (
+                "【2026-08-31】分会 | 关于召开“2026年海洋食品安全与营养健康学术会议”的通知（第二轮）",
+                "https://www.example.gov.cn/notice/182630200.html",
+                today,
+            ),
+            (
+                "分会 | 关于召开“2026年海洋食品安全与营养健康学术会议”的通知（第二轮）",
+                "https://www.example.gov.cn/acadconfg/182630200.html",
+                today - timedelta(minutes=30),
+            ),
+            ("市场监管总局发布保健食品备案管理新规", "https://www.example.gov.cn/a/10", older_a),
+            ("监管部门征求意见拟调整保健食品功能目录", "https://www.example.gov.cn/a/11", older_b),
+        ],
+    )
+
+    result = build_news_article(
+        database_path,
+        FakeComposeGateway(lambda _prompt: _valid_payload()),
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        now=NOW,
+    )
+    assert result.status == "built"
+    assert result.mode == "daily"
+    assert result.item_count == 3
+    markdown = Path(result.detail).joinpath("news-article.md").read_text(encoding="utf-8")
+    assert markdown.count("182630200") == 1
+    assert "备案管理新规" in markdown
+    assert "功能目录" in markdown

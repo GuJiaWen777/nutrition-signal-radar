@@ -18,6 +18,7 @@ from nutrition_signal_radar.news_registry import (
 from nutrition_signal_radar.news_selection import (
     evaluate_pending_news_articles,
     list_news_items,
+    url_identity_keys,
 )
 from tests.test_site_fetch_gateway import CST, NOW, FakeResponse, FakeSession
 
@@ -195,7 +196,7 @@ def test_selection_expo_preview_maps_to_p3_and_plain_expo_to_p2(tmp_path: Path) 
     opening = items["NHNE健康营养博览会今日在上海开幕"]
     assert preview.priority == "P3"
     assert opening.priority == "P2"
-    assert report.daily_eligible is True
+    assert report.daily_eligible is False
 
 
 def test_news_selection_cli_select_and_list_items(tmp_path: Path, capsys) -> None:
@@ -276,6 +277,57 @@ def test_selection_catches_date_prefixed_repost_variants(tmp_path: Path) -> None
     )
     assert duplicate.selected is False
     assert duplicate.rejection_reasons[0]["code"] == "duplicate_title"
+
+
+def test_url_identity_keys_collapse_cms_section_paths() -> None:
+    notice = url_identity_keys("https://www.cnsoc.org/notice/182630200.html")
+    other_section = url_identity_keys("https://www.cnsoc.org/acadconfg/182630200.html")
+    assert notice & other_section
+    assert "cnsoc.org#id:182630200" in notice
+
+    short_a = url_identity_keys("https://www.example.gov.cn/a/1")
+    short_b = url_identity_keys("https://www.example.gov.cn/a/2")
+    assert not (short_a & short_b)
+
+
+def test_selection_rejects_same_cms_id_on_different_paths(tmp_path: Path) -> None:
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+    _enable(
+        database_path,
+        name="测试科研源",
+        domain="cnsoc.example",
+        category="research",
+        entry_url="https://www.cnsoc.example/feed.xml",
+        fetch_kind="rss",
+        default_priority="P2",
+    )
+    recent = (NOW - timedelta(hours=1)).astimezone(CST)
+    feed = f"""<?xml version="1.0"?>
+    <rss version="2.0"><channel><title>t</title>
+      <item><title>关于召开2026年海洋食品安全与营养健康学术会议的通知（第二轮）</title>
+        <link>https://www.cnsoc.example/notice/182630200.html</link>
+        <pubDate>Mon, {recent:%d %b %Y} 08:00:00 +0800</pubDate>
+        <description>营养健康学术会议第二轮通知，请相关单位报名参加。</description></item>
+      <item><title>分会发布海洋食品专题会议第二轮报名安排</title>
+        <link>https://www.cnsoc.example/acadconfg/182630200.html</link>
+        <pubDate>Mon, {recent:%d %b %Y} 09:00:00 +0800</pubDate>
+        <description>同一通知在另一栏目页重复出现，营养健康会议报名安排。</description></item>
+    </channel></rss>"""
+    _ingest_rss(
+        database_path, feed, entry_url="https://www.cnsoc.example/feed.xml", name="测试科研源"
+    )
+
+    report = evaluate_pending_news_articles(database_path)
+
+    assert report.selected == 1
+    assert report.rejection_counts.get("duplicate_url") == 1
+    items = {item.url: item for item in list_news_items(database_path)}
+    kept = items["https://www.cnsoc.example/notice/182630200.html"]
+    duplicate = items["https://www.cnsoc.example/acadconfg/182630200.html"]
+    assert kept.selected is True
+    assert duplicate.selected is False
+    assert duplicate.rejection_reasons[0]["code"] == "duplicate_url"
 
 
 def test_policy_sources_count_bare_food_terms_as_relevant(tmp_path: Path) -> None:

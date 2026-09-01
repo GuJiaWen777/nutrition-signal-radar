@@ -685,7 +685,12 @@ def _fetch_cninfo(
         if not title:
             continue
         adjunct = str(announcement.get("adjunctUrl") or "").strip()
-        url = f"https:{adjunct}" if adjunct.startswith("//") else adjunct
+        if adjunct.startswith("//"):
+            url = f"https:{adjunct}"
+        elif adjunct and not adjunct.startswith(("http://", "https://")):
+            url = f"https://static.cninfo.com.cn/{adjunct.lstrip('/')}"
+        else:
+            url = adjunct
         sec_name = str(announcement.get("secName") or "").strip()
         sec_code = str(announcement.get("secCode") or "").strip()
         items.append(

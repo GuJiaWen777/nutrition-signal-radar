@@ -990,7 +990,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(
                         f"News selection completed: {report.evaluated} evaluated; "
                         f"{report.selected} selected; {report.rejected} rejected; "
-                        f"daily article {'eligible' if report.daily_eligible else 'NOT eligible (<2 items)'}"
+                        f"daily article {'eligible' if report.daily_eligible else 'NOT eligible (<3 items)'}"
                     )
                     for reason_code, count in sorted(
                         report.rejection_counts.items(), key=lambda item: -item[1]
