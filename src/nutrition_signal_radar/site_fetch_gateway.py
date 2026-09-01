@@ -487,7 +487,7 @@ def _fetch_html_browser(
             raise SiteFetchError(f"浏览器渲染失败：{source.entry_url}（{exc}）") from exc
 
     html_text = render_once(source.parser_config)
-    items = _items_from_dom(html_text, source)
+    items = _items_from_dom(html_text, source, allow_hash_links=True)
     # JS sites and CDNs are flaky: some nodes serve a degraded shell without
     # the dated list.  Re-render (with a longer settle) up to two more times
     # before declaring the page dateless.  The check must use the same uncapped
@@ -503,7 +503,7 @@ def _fetch_html_browser(
         config = config if isinstance(config, dict) else {}
         config["wait_seconds"] = max(6, int(config.get("wait_seconds") or 2) + extra_wait)
         html_text = render_once(json.dumps(config, ensure_ascii=False))
-        items = _items_from_dom(html_text, source)
+        items = _items_from_dom(html_text, source, allow_hash_links=True)
 
     body = html_text.encode("utf-8")
     snapshot = _write_snapshot(
@@ -514,13 +514,16 @@ def _fetch_html_browser(
 
 
 def _items_from_dom(
-    html_text: str, source: NewsSource, scan_cap: int = 200
+    html_text: str, source: NewsSource, scan_cap: int = 200,
+    *, allow_hash_links: bool = False,
 ) -> list[FetchedItem]:
     """Shared anchor/date extraction for static and browser-rendered pages.
 
     ``scan_cap`` bounds the candidate scan (navigation links often precede the
     news list); the caller caps the *kept* items after window filtering, so
-    this cap must not truncate early candidates.
+    this cap must not truncate early candidates.  ``allow_hash_links`` is set
+    for browser-rendered SPA pages whose items link through hash routes
+    (meaningful after JS rendering, placeholders in static HTML).
     """
 
     parser = _AnchorTextParser()
@@ -533,8 +536,13 @@ def _items_from_dom(
     items: list[FetchedItem] = []
     for index, anchor in enumerate(parser.anchors):
         href = str(anchor["href"]).strip()
-        if not href or href.startswith(_FORBIDDEN_HREF_PREFIXES):
+        if not href:
             continue
+        if href.startswith("#"):
+            # SPA pages rendered by the browser link items through hash routes;
+            # only a bare "#" placeholder stays excluded.
+            if not (allow_hash_links and len(href) > 1):
+                continue
         start, end = int(anchor["start"]), int(anchor["end"])
         # Gov/portal pages often truncate the visible anchor text and keep the
         # full headline in the ``title`` attribute — prefer the longer one.
