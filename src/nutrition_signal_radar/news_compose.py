@@ -589,7 +589,7 @@ def _render_markdown(article: _ArticleDocument) -> str:
     lines.append("")
     lines.append("## 信息说明")
     lines.append("")
-    lines.append("本文根据公开信息整理，具体内容以原始发布方为准。")
+    lines.append(_info_note(article))
     return "\n".join(lines) + "\n"
 
 
@@ -598,6 +598,16 @@ def _lead_paragraph(article: _ArticleDocument) -> str:
     return (
         f"本期收录 {len(article.items)} 条营养健康产业公开资讯，"
         f"涉及{involved}。"
+    )
+
+
+def _info_note(article: _ArticleDocument) -> str:
+    """文末信息说明：收录统计 + 监测日期 + 整理声明，自包含。"""
+
+    return (
+        f"信息说明：{_lead_paragraph(article)}"
+        f"监测日期：{article.generated_at:%Y.%m.%d}。"
+        "本文根据公开信息整理，具体内容以原始发布方为准。"
     )
 
 
@@ -663,7 +673,7 @@ def _render_html(article: _ArticleDocument) -> str:
         f"本期关键词</p><p style=\"margin:0;line-height:2;\">{keywords}</p></section>"
         f'<section style="padding:6px 18px 30px;">'
         f'<p style="margin:0;font-size:12px;color:{_BRAND_COLORS["muted"]};line-height:1.7;">'
-        f"信息说明：本文根据公开信息整理，具体内容以原始发布方为准。</p></section>"
+        f"{esc(_info_note(article))}</p></section>"
         f"</section>"
     )
 
