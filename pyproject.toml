@@ -9,6 +9,7 @@ description = "Local topic and research workbench for nutrition and functional-f
 requires-python = ">=3.10"
 dependencies = [
   "openpyxl>=3.1",
+  "pillow>=10.0",
   "requests>=2.31",
 ]
 
@@ -22,7 +23,7 @@ nutrition-radar = "nutrition_signal_radar.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-nutrition_signal_radar = ["static/*.html", "static/*.css", "static/*.js"]
+nutrition_signal_radar = ["static/*.html", "static/*.css", "static/*.js", "templates/*.html"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

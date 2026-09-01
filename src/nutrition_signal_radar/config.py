@@ -38,6 +38,8 @@ class RadarSettings:
     llm_api_key: str
     llm_base_url: str
     llm_model: str
+    wechat_app_id: str
+    wechat_app_secret: str
 
     @property
     def redfox_ready(self) -> bool:
@@ -46,6 +48,10 @@ class RadarSettings:
     @property
     def llm_ready(self) -> bool:
         return bool(self.llm_provider and self.llm_api_key and self.llm_base_url and self.llm_model)
+
+    @property
+    def wechat_ready(self) -> bool:
+        return bool(self.wechat_app_id and self.wechat_app_secret)
 
     @property
     def demo_database_path(self) -> Path:
@@ -66,6 +72,11 @@ class RadarSettings:
     def agent_raw_directory(self) -> Path:
         """Keep desensitized research-agent exchanges in local runtime state."""
         return self.data_dir / "raw" / "agent"
+
+    @property
+    def news_raw_directory(self) -> Path:
+        """Store desensitized news-line site responses in local runtime state."""
+        return self.data_dir / "raw" / "sites"
 
     @property
     def we_mprss_pilot_database_path(self) -> Path:
@@ -132,6 +143,8 @@ def load_settings(
         llm_api_key=values.get("RADAR_LLM_API_KEY", "").strip(),
         llm_base_url=base_url,
         llm_model=values.get("RADAR_LLM_MODEL", "").strip(),
+        wechat_app_id=values.get("WECHAT_APP_ID", "").strip(),
+        wechat_app_secret=values.get("WECHAT_APP_SECRET", "").strip(),
     )
 
 

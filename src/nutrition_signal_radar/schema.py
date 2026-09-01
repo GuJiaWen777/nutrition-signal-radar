@@ -727,6 +727,146 @@ SIGNAL_PRIORITY_SCHEMA = Migration(
 )
 
 
+NEWS_SOURCE_WHITELIST_SCHEMA = Migration(
+    version=12,
+    name="news_line_whitelist_sources",
+    statements=(
+        f"""
+        CREATE TABLE news_sources (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            domain TEXT NOT NULL UNIQUE,
+            category TEXT NOT NULL
+                CHECK (category IN ('policy', 'disclosure', 'brand', 'expo', 'research')),
+            entry_url TEXT NOT NULL
+                CHECK (entry_url LIKE 'http://%' OR entry_url LIKE 'https://%'),
+            fetch_kind TEXT NOT NULL DEFAULT 'html_list'
+                CHECK (fetch_kind IN ('html_list', 'api', 'rss')),
+            default_priority TEXT NOT NULL
+                CHECK (default_priority IN ('P0', 'P1', 'P2', 'P3')),
+            parser_version TEXT NOT NULL DEFAULT 'v1',
+            enabled INTEGER NOT NULL DEFAULT 0,
+            sync_health TEXT NOT NULL DEFAULT 'paused',
+            last_fetched_at TEXT,
+            last_item_at TEXT,
+            notes TEXT NOT NULL DEFAULT '',
+            derived_from TEXT,
+            created_at TEXT NOT NULL DEFAULT ({UTC_NOW}),
+            updated_at TEXT NOT NULL DEFAULT ({UTC_NOW})
+        )
+        """,
+        """
+        CREATE INDEX ix_news_sources_enabled_priority
+        ON news_sources(enabled, default_priority, name)
+        """,
+        f"""
+        CREATE TABLE news_source_events (
+            id INTEGER PRIMARY KEY,
+            news_source_id INTEGER NOT NULL
+                REFERENCES news_sources(id) ON DELETE RESTRICT,
+            event_type TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            reason TEXT,
+            payload_json TEXT NOT NULL DEFAULT '{{}}',
+            created_at TEXT NOT NULL DEFAULT ({UTC_NOW})
+        )
+        """,
+        """
+        CREATE INDEX ix_news_source_events_source
+        ON news_source_events(news_source_id, id DESC)
+        """,
+    ),
+)
+
+
+NEWS_ITEM_SELECTION_SCHEMA = Migration(
+    version=13,
+    name="news_item_selection_decisions",
+    statements=(
+        f"""
+        CREATE TABLE news_items (
+            id INTEGER PRIMARY KEY,
+            article_id INTEGER NOT NULL UNIQUE
+                REFERENCES source_articles(id) ON DELETE RESTRICT,
+            news_source_id INTEGER NOT NULL
+                REFERENCES news_sources(id) ON DELETE RESTRICT,
+            title TEXT NOT NULL,
+            url TEXT,
+            published_at TEXT,
+            source_name TEXT NOT NULL,
+            source_category TEXT NOT NULL,
+            section TEXT NOT NULL
+                CHECK (section IN ('policy', 'brand_finance', 'expo', 'research')),
+            priority TEXT NOT NULL
+                CHECK (priority IN ('P0', 'P1', 'P2', 'P3')),
+            selected INTEGER NOT NULL CHECK (selected IN (0, 1)),
+            decision TEXT NOT NULL CHECK (decision IN ('selected', 'rejected')),
+            rejection_reasons TEXT NOT NULL DEFAULT '[]',
+            priority_reasons TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT ({UTC_NOW})
+        )
+        """,
+        """
+        CREATE INDEX ix_news_items_selected_order
+        ON news_items(selected, priority, published_at DESC)
+        """,
+    ),
+)
+
+
+NEWS_ARTICLE_SCHEMA = Migration(
+    version=14,
+    name="news_article_builds",
+    statements=(
+        f"""
+        CREATE TABLE news_articles (
+            id INTEGER PRIMARY KEY,
+            slug TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            mode TEXT NOT NULL CHECK (mode IN ('daily', 'weekly')),
+            title TEXT NOT NULL,
+            item_count INTEGER NOT NULL CHECK (item_count >= 0),
+            llm_model TEXT NOT NULL DEFAULT '',
+            relative_path TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL,
+            file_count INTEGER NOT NULL CHECK (file_count >= 1),
+            created_at TEXT NOT NULL DEFAULT ({UTC_NOW}),
+            UNIQUE (slug, version)
+        )
+        """,
+        """
+        CREATE INDEX ix_news_articles_slug_version
+        ON news_articles(slug, version DESC)
+        """,
+    ),
+)
+
+
+NEWS_WECHAT_PUSH_SCHEMA = Migration(
+    version=15,
+    name="news_wechat_push_records",
+    statements=(
+        """
+        ALTER TABLE news_articles ADD COLUMN wechat_media_id TEXT
+        """,
+        """
+        ALTER TABLE news_articles ADD COLUMN wechat_pushed_at TEXT
+        """,
+    ),
+)
+
+
+NEWS_SOURCE_PARSER_CONFIG_SCHEMA = Migration(
+    version=16,
+    name="news_source_parser_config",
+    statements=(
+        """
+        ALTER TABLE news_sources ADD COLUMN parser_config TEXT NOT NULL DEFAULT ''
+        """,
+    ),
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     INITIAL_SCHEMA,
     DEMO_CLUSTERING_SCHEMA,
@@ -739,6 +879,11 @@ MIGRATIONS: tuple[Migration, ...] = (
     WEEKLY_ARTICLE_SCHEMA,
     RESEARCH_SOURCE_MEDIA_TYPE_SCHEMA,
     SIGNAL_PRIORITY_SCHEMA,
+    NEWS_SOURCE_WHITELIST_SCHEMA,
+    NEWS_ITEM_SELECTION_SCHEMA,
+    NEWS_ARTICLE_SCHEMA,
+    NEWS_WECHAT_PUSH_SCHEMA,
+    NEWS_SOURCE_PARSER_CONFIG_SCHEMA,
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
 

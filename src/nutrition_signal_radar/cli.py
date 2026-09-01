@@ -23,6 +23,26 @@ from .doctor import build_doctor_report, render_doctor_report
 from .ingest_service import import_article_batch
 from .knowledge_base import export_knowledge_base, knowledge_base_stats
 from .llm_gateway import LlmGateway, LlmGatewayError
+from .news_compose import (
+    NewsComposeError,
+    build_news_article,
+    load_news_article_build,
+    mark_news_article_pushed,
+)
+from .news_fetch_service import NewsFetchError, fetch_enabled_news_sources
+from .news_registry import (
+    NewsRegistryError,
+    configure_news_source,
+    list_enabled_news_sources,
+    list_news_sources,
+    news_source_seed_count,
+    seed_news_sources,
+    set_news_source_enabled,
+)
+from .news_selection import (
+    evaluate_pending_news_articles,
+    list_news_items,
+)
 from .redfox_gateway import (
     DEFAULT_REDFOX_ACCOUNT_NAMES,
     RedFoxGateway,
@@ -47,6 +67,7 @@ from .source_registry import (
     set_source_account_enabled,
 )
 from .sync_service import backfill_missing_bodies, sync_enabled_redfox_sources
+from .wechat_gateway import WechatGatewayError, push_news_draft
 from .weekly_service import (
     WeeklyArticleError,
     build_weekly_article_prompt,
@@ -320,6 +341,158 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Required acknowledgement before fetching the public article page.",
     )
     source_import_article.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+
+    news = commands.add_parser(
+        "news",
+        help="Manage the Phase 4 news-line whitelist of directly fetched primary sources.",
+    )
+    news_commands = news.add_subparsers(dest="news_command", required=True)
+    news_seed = news_commands.add_parser(
+        "seed-sources",
+        help="Seed the documented news-whitelist proposals as disabled sources.",
+    )
+    news_seed.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    news_list = news_commands.add_parser(
+        "list-sources",
+        help="List news-line whitelist entries without external calls.",
+    )
+    news_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    news_configure = news_commands.add_parser(
+        "configure-source",
+        help="Create or edit one news-whitelist source; it stays disabled unless --enabled is explicit.",
+    )
+    news_configure.add_argument("--name", required=True, help="Whitelist source display name.")
+    news_configure.add_argument("--domain", required=True, help="Bare domain or HTTP(S) URL.")
+    news_configure.add_argument(
+        "--category",
+        required=True,
+        choices=("policy", "disclosure", "brand", "expo", "research"),
+        help="Whitelist category per ADR-0014.",
+    )
+    news_configure.add_argument(
+        "--entry-url", required=True, help="HTTP(S) fetch entry (list page, API endpoint, or RSS feed)."
+    )
+    news_configure.add_argument(
+        "--fetch-kind",
+        choices=("html_list", "api", "rss"),
+        default="html_list",
+        help="How the entry URL is fetched (default: html_list).",
+    )
+    news_configure.add_argument(
+        "--priority",
+        default="P2",
+        choices=("P0", "P1", "P2", "P3"),
+        help="Default news priority for items from this source (default: P2).",
+    )
+    news_configure.add_argument(
+        "--parser-version", default="v1", help="Parser-config version tag (default: v1)."
+    )
+    news_configure.add_argument(
+        "--parser-config",
+        help=(
+            "Optional parser options as a JSON object, e.g. "
+            '\'{"searchkey":"保健"}\' for the cninfo announcement query.'
+        ),
+    )
+    news_configure.add_argument("--notes", help="Optional operator notes.")
+    news_configure.add_argument(
+        "--enabled",
+        action="store_true",
+        help="Explicitly enable after operator confirmation of this whitelist entry.",
+    )
+    news_configure.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    news_enable = news_commands.add_parser(
+        "set-source-enabled",
+        help="Explicitly enable or pause one news-whitelist source with an audit event.",
+    )
+    news_enable.add_argument("--name", required=True, help="Configured whitelist source name.")
+    news_enable_group = news_enable.add_mutually_exclusive_group(required=True)
+    news_enable_group.add_argument("--enable", action="store_true", help="Enable the confirmed whitelist entry.")
+    news_enable_group.add_argument("--disable", action="store_true", help="Pause the whitelist entry.")
+    news_enable.add_argument("--reason", help="Optional operator audit note.")
+    news_enable.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    news_fetch = news_commands.add_parser(
+        "fetch",
+        help="Fetch every enabled news-whitelist source; external requests require --live.",
+    )
+    news_fetch.add_argument(
+        "--live",
+        action="store_true",
+        help="Required acknowledgement before any external site request is made.",
+    )
+    news_fetch.add_argument(
+        "--lookback-hours",
+        type=int,
+        default=24,
+        help="Keep items published within this many hours (default: 24).",
+    )
+    news_fetch.add_argument(
+        "--max-items",
+        type=int,
+        default=30,
+        help="Maximum in-window items kept per source (default: 30).",
+    )
+    news_fetch.add_argument(
+        "--source",
+        action="append",
+        dest="sources",
+        help="Restrict the run to these configured source names; repeat as needed.",
+    )
+    news_fetch.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    news_select = news_commands.add_parser(
+        "select",
+        help="Apply deterministic admission rules to fetched news articles (no network, no LLM).",
+    )
+    news_select.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    news_items = news_commands.add_parser(
+        "list-items",
+        help="List recorded news-item decisions (the daily source-table view).",
+    )
+    news_items.add_argument(
+        "--selected-only", action="store_true", help="Only show items admitted for article building."
+    )
+    news_items.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    news_build = news_commands.add_parser(
+        "build",
+        help="Summarize selected items and assemble the versioned local article (LLM calls require --live).",
+    )
+    news_build.add_argument(
+        "--live",
+        action="store_true",
+        help="Required acknowledgement before any LLM API request is made.",
+    )
+    news_build.add_argument(
+        "--lookback-hours",
+        type=int,
+        default=24,
+        help="Daily selection window in hours (default: 24; falls back to a 7-day weekly view).",
+    )
+    news_build.add_argument(
+        "--max-items",
+        type=int,
+        default=5,
+        help="Maximum items included in one article (default: 5).",
+    )
+    news_build.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    news_publish = news_commands.add_parser(
+        "publish",
+        help="Push one built news article into the WeChat draft box (requires --live and credentials).",
+    )
+    news_publish.add_argument(
+        "--live",
+        action="store_true",
+        help="Required acknowledgement before any WeChat API request is made.",
+    )
+    news_publish.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Required human confirmation after reviewing the local artifacts; publish never runs automatically.",
+    )
+    news_publish.add_argument("--slug", required=True, help="Built article slug, e.g. news-2026-09-01.")
+    news_publish.add_argument("--version", type=int, required=True, help="Built article version number.")
+    news_publish.add_argument("--author", default="EarlyData", help="Draft author display name (default: EarlyData).")
+    news_publish.add_argument("--digest", help="Optional draft digest; defaults to the article lead paragraph.")
+    news_publish.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
 
     sync = commands.add_parser(
         "sync",
@@ -732,6 +905,281 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
         except (SourceRegistryError, OSError, ValueError) as exc:
             print(f"Source configuration failed: {exc}", file=sys.stderr)
+            return 1
+
+    if args.command == "news":
+        try:
+            if args.news_command == "seed-sources":
+                result = seed_news_sources(settings.database_path)
+                if args.json:
+                    print(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
+                else:
+                    print(
+                        f"News-whitelist seed completed: {result.inserted} inserted; "
+                        f"{result.already_present} already present "
+                        f"(documented proposal size: {news_source_seed_count()}). "
+                        "All seeded sources remain disabled until an operator confirms and enables them."
+                    )
+                return 0
+
+            if args.news_command == "list-sources":
+                sources = [source.as_dict() for source in list_news_sources(settings.database_path)]
+                enabled_count = len(list_enabled_news_sources(settings.database_path))
+                payload = {
+                    "sources": sources,
+                    "source_count": len(sources),
+                    "enabled_count": enabled_count,
+                }
+                if args.json:
+                    print(json.dumps(payload, ensure_ascii=False, indent=2))
+                else:
+                    if not sources:
+                        print("No news-whitelist sources are configured yet.")
+                    for source in sources:
+                        print(
+                            f"- {source['name']} ({source['category']}): "
+                            f"{'enabled' if source['enabled'] else 'disabled'}; "
+                            f"{source['default_priority']}; {source['fetch_kind']}; "
+                            f"{source['entry_url']}"
+                        )
+                    print(f"News whitelist: {len(sources)} total; {enabled_count} enabled.")
+                return 0
+
+            if args.news_command == "configure-source":
+                source = configure_news_source(
+                    settings.database_path,
+                    name=args.name,
+                    domain=args.domain,
+                    category=args.category,
+                    entry_url=args.entry_url,
+                    fetch_kind=args.fetch_kind,
+                    default_priority=args.priority,
+                    parser_version=args.parser_version,
+                    parser_config=args.parser_config or "",
+                    notes=args.notes,
+                    enabled=args.enabled,
+                )
+                if args.json:
+                    print(json.dumps(source.as_dict(), ensure_ascii=False, indent=2))
+                else:
+                    print(
+                        f"Configured news source {source.name}: "
+                        f"{'enabled' if source.enabled else 'disabled'}; "
+                        f"{source.category}; {source.default_priority}; {source.entry_url}."
+                    )
+                return 0
+
+            if args.news_command == "set-source-enabled":
+                source = set_news_source_enabled(
+                    settings.database_path,
+                    name=args.name,
+                    enabled=bool(args.enable),
+                    reason=args.reason,
+                )
+                if args.json:
+                    print(json.dumps(source.as_dict(), ensure_ascii=False, indent=2))
+                else:
+                    print(f"{source.name} is now {'enabled' if source.enabled else 'disabled'}.")
+                return 0
+
+            if args.news_command == "fetch":
+                if not args.live:
+                    payload = {
+                        "status": "protected",
+                        "message": (
+                            "News fetch performs external site requests; "
+                            "rerun with --live to acknowledge them."
+                        ),
+                    }
+                    if args.json:
+                        print(json.dumps(payload, ensure_ascii=False, indent=2))
+                    else:
+                        print(payload["message"], file=sys.stderr)
+                    return 2
+                try:
+                    report = fetch_enabled_news_sources(
+                        settings.database_path,
+                        lookback_hours=args.lookback_hours,
+                        max_items_per_source=args.max_items,
+                        raw_dir=settings.news_raw_directory,
+                        source_names=tuple(args.sources or ()),
+                    )
+                except (NewsFetchError, NewsRegistryError, OSError, ValueError) as exc:
+                    print(f"News fetch failed: {exc}", file=sys.stderr)
+                    return 1
+                if args.json:
+                    print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
+                else:
+                    print(
+                        f"News fetch completed: {len(report.outcomes)} sources; "
+                        f"{report.succeeded} succeeded; {report.failed} failed; "
+                        f"{report.articles_inserted} inserted; {report.articles_updated} updated."
+                    )
+                    for outcome in report.outcomes:
+                        detail = (
+                            f"error: {outcome.error}" if outcome.error else f"{outcome.items_found} items"
+                        )
+                        print(
+                            f"- {outcome.source_name} ({outcome.fetch_kind}): "
+                            f"{outcome.status}; {detail}"
+                        )
+                return 0
+
+            if args.news_command == "select":
+                report = evaluate_pending_news_articles(settings.database_path)
+                if args.json:
+                    print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
+                else:
+                    print(
+                        f"News selection completed: {report.evaluated} evaluated; "
+                        f"{report.selected} selected; {report.rejected} rejected; "
+                        f"daily article {'eligible' if report.daily_eligible else 'NOT eligible (<2 items)'}"
+                    )
+                    for reason_code, count in sorted(
+                        report.rejection_counts.items(), key=lambda item: -item[1]
+                    ):
+                        print(f"  rejected[{reason_code}]: {count}")
+                    for section, count in sorted(report.selected_by_section.items()):
+                        print(f"  selected[{section}]: {count}")
+                return 0
+
+            if args.news_command == "list-items":
+                items = [
+                    item.as_dict()
+                    for item in list_news_items(settings.database_path, selected_only=args.selected_only)
+                ]
+                if args.json:
+                    print(json.dumps({"items": items, "count": len(items)}, ensure_ascii=False, indent=2))
+                else:
+                    if not items:
+                        print("No news items recorded yet; run 'news fetch' then 'news select'.")
+                    for item in items:
+                        state = "selected" if item["selected"] else "rejected"
+                        codes = ",".join(
+                            reason["code"] for reason in item["rejection_reasons"]
+                        )
+                        suffix = f"; {codes}" if codes else ""
+                        print(
+                            f"- [{item['priority']}|{item['section_label']}] {item['title']} "
+                            f"({item['source_name']} · {item['published_at']}) → {state}{suffix}"
+                        )
+                return 0
+
+            if args.news_command == "build":
+                if not args.live:
+                    payload = {
+                        "status": "protected",
+                        "message": (
+                            "News build calls the configured LLM for summaries; "
+                            "rerun with --live to acknowledge the requests."
+                        ),
+                    }
+                    if args.json:
+                        print(json.dumps(payload, ensure_ascii=False, indent=2))
+                    else:
+                        print(payload["message"], file=sys.stderr)
+                    return 2
+                if not settings.llm_ready:
+                    print(
+                        "News build requires the analysis backend: set RADAR_LLM_PROVIDER, "
+                        "RADAR_LLM_API_KEY, RADAR_LLM_BASE_URL and RADAR_LLM_MODEL in .env.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                gateway = LlmGateway(
+                    api_key=settings.llm_api_key,
+                    base_url=settings.llm_base_url,
+                    model=settings.llm_model,
+                )
+                try:
+                    logo_path = settings.data_dir / "assets" / "earlydata-logo.png"
+                    result = build_news_article(
+                        settings.database_path,
+                        gateway,
+                        exports_dir=settings.exports_directory / "news-articles",
+                        llm_model=settings.llm_model,
+                        lookback_hours=args.lookback_hours,
+                        max_items=args.max_items,
+                        logo_path=logo_path if logo_path.is_file() else None,
+                    )
+                except (NewsComposeError, LlmGatewayError, NewsRegistryError, OSError, ValueError) as exc:
+                    print(f"News build failed: {exc}", file=sys.stderr)
+                    return 1
+                if args.json:
+                    print(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
+                else:
+                    if result.status == "skipped":
+                        print(f"News build skipped ({result.mode}): {result.detail}")
+                    else:
+                        print(
+                            f"Built {result.mode} article v{result.version:03d}: {result.title} "
+                            f"({result.item_count} items) at {result.detail}"
+                        )
+                        for file_name in result.files:
+                            print(f"  - {file_name}")
+                return 0
+
+            if args.news_command == "publish":
+                if not args.live or not args.confirm:
+                    payload = {
+                        "status": "protected",
+                        "message": (
+                            "News publish performs WeChat API requests and always requires a "
+                            "human decision: review the local article first, then rerun with "
+                            "--live --confirm. It never runs inside the scheduled daily chain."
+                        ),
+                    }
+                    if args.json:
+                        print(json.dumps(payload, ensure_ascii=False, indent=2))
+                    else:
+                        print(payload["message"], file=sys.stderr)
+                    return 2
+                if not settings.wechat_ready:
+                    print(
+                        "News publish requires WeChat credentials: "
+                        "set WECHAT_APP_ID and WECHAT_APP_SECRET in .env.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                try:
+                    build_info = load_news_article_build(
+                        settings.database_path, slug=args.slug, version=args.version
+                    )
+                    if build_info["wechat_media_id"]:
+                        print(
+                            f"Already pushed as media_id {build_info['wechat_media_id']}; "
+                            "no duplicate draft was created.",
+                            file=sys.stderr,
+                        )
+                        return 1
+                    result = push_news_draft(
+                        app_id=settings.wechat_app_id,
+                        secret=settings.wechat_app_secret,
+                        title=str(build_info["title"]),
+                        html_content=Path(str(build_info["html_path"])).read_text(encoding="utf-8"),
+                        cover_path=Path(str(build_info["cover_path"])),
+                        digest=args.digest or "",
+                        author=args.author,
+                    )
+                    mark_news_article_pushed(
+                        settings.database_path,
+                        slug=args.slug,
+                        version=args.version,
+                        media_id=result.media_id,
+                    )
+                except (NewsComposeError, WechatGatewayError, OSError, ValueError) as exc:
+                    print(f"News publish failed: {exc}", file=sys.stderr)
+                    return 1
+                if args.json:
+                    print(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
+                else:
+                    print(
+                        f"Draft created for {args.slug} v{args.version:03d}: "
+                        f"media_id {result.media_id}. Publishing to followers stays a manual step."
+                    )
+                return 0
+        except (NewsRegistryError, OSError, ValueError) as exc:
+            print(f"News whitelist configuration failed: {exc}", file=sys.stderr)
             return 1
 
     if args.command == "sync":

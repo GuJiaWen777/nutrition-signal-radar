@@ -2,13 +2,15 @@
 
 这是“营养健康行业信号雷达”的独立工作区。当前版本完成行业信号审阅、选题判断和选题包确认，提供“已选题 → 可编辑研究任务书 → 人工确认 → 离线文章 Demo → 人工审阅/版本 → 最终本地 Markdown”的交互切片，并可导出等待人工审阅的“本周信号快报”横向扫描草稿；同一期次还可由 pi 生成标题为《营养保健行业周报|钩子式主标题》的“可发布周报文章”成品，正文不含“待补证”等内部标记，发布前仍需人工确认。
 
-本项目的最终业务目标（2026-08-28 确认）：运营自有公众号「EarlyData电商大数据」——对标「庶正康讯」等行业媒体账号，通过持续、可发布的行业内容获得更多关注与点击，订阅用户可获得行业资讯与数据咨询。围绕该目标规划了每日快报、多候选标题、自有账号赛道参数包等运营切片（见 `IMPLEMENTATION_PLAN.md` Phase 3）。系统本身仍不包含任何微信公众号写入、草稿箱或群发路径，所有发布由人工复制完成。
+本项目的最终业务目标（2026-08-28 确认）：运营自有公众号「EarlyData电商大数据」——对标「庶正康讯」等行业媒体账号，通过持续、可发布的行业内容获得更多关注与点击，订阅用户可获得行业资讯与数据咨询。围绕该目标规划了每日快报、多候选标题、自有账号赛道参数包等运营切片（见 `IMPLEMENTATION_PLAN.md` Phase 3）。2026-08-31 又确认了独立的资讯自动线方向（Phase 4，需求见 `docs/DSA自动化文章需求.docx`、边界见 [ADR-0014](docs/adr/0014-news-line-and-wechat-draft-publishing.md)）：从人工确认的白名单直采信源每日自动成文《营养健康行业资讯》，并可自动写入公众号草稿箱；群发路径仍被禁止，周报等既有产物仍由人工复制发布。
 
 2026-08-14 起，本项目以独立 Git 仓库维护：`GuJiaWen777/nutrition-signal-radar`。它从历史的 EarlyData 周报实践中派生，但不再是 `SentimentTracker` 仓库中的扩展目录，也不共享代码、运行库、数据库或密钥。原项目只可作为外部 Demo 输入文件的可选位置，不能被本项目写入或修改。
 
 当前状态：需求基线和实施计划已经确认；`F-01` 至 `F-07` 已完成，包括独立脚手架、SQLite 基础、本地 Excel 导入、可操作的选题看板、双审阅队列、可编辑选题包、监测期次隔离和本期选题归档。`P0-01/P0-02` RedFox 窄适配器与六账号受控真实验证已完成：4 个账号获“建议启用”、1 个需修正名称、1 个在优质库未收录；结论不会自动写入来源配置。`P1-01/P1-02` 来源注册表、人工启用门禁、增量同步与账号健康切片已实现；`P1-07` 新增版本化“本周信号快报”横向扫描草稿；2026-08-17 新增 schema v9 `weekly_articles` 表与 pi 生成的可发布周报文章切片；2026-08-18 深度研究升级为“正文可直接发布”契约并完成首个真实任务。`P2-01` 已完成研究任务书人工门禁；schema v8/v9/v10 在稿件、来源和版本记录基础上增加来源注册、同步审计、周信号快报、可发布周报文章与 media 来源类型记录，并实现一个必须人工启动的离线文章 Demo。它不调用微信接口，也不能自动发布。2026-08-19 已接入 `signals analyze --live`：规则负责召回与初排，DeepSeek（OpenAI 兼容协议、可配置）只填充行业信号的解读字段，评分与状态不变；可发布周报文章改用“赛道参数包”注入写作规范并带质量体检与一次有界修订。
 
 2026-08-19 已把 30 天演练期次按周拆分：`cycle-2026-07-17-2026-07-26`（首周含期初三天）、`cycle-2026-07-27-2026-08-02`、`cycle-2026-08-03-2026-08-09`、`cycle-2026-08-10-2026-08-16` 四个周次为只读历史（各自含规则重建的信号与信号快报），并新建空白周次 `cycle-2026-08-17-2026-08-23` 保持开放作为每周起点。拆分工具为 `cycle_split.py` + `scripts/split_cycle_into_weeks.py`（周界按“08-10~08-16 为一周往前推”）；周度例行操作见 `docs/WEEKLY_WORKFLOW.md`；“本周快报”标签页已移到“选题看板”之前。
+
+2026-08-31 资讯自动线（Phase 4）开工，2026-09-01 `P4-01`–`P4-07` 七个切片全部实现：资讯白名单（29 个建议信源默认停用，schema v12）；直采适配器（RSS / 列表页 / 巨潮接口，24 小时窗口、脱敏存档、幂等入库、单源失败隔离）；确定性筛选分级（schema v13，五项入选条件、栏目、P0–P3、去重、落选理由码）；DeepSeek 摘要成文（schema v14，JSON 契约 + 内容红线 + 质检日志）；品牌封面 PIL 生成（1800×766，Logo 可选）；微信草稿箱网关（schema v15，`news publish --live --confirm` 双重人工门禁，每稿限推一次，群发全面禁止）；每日调度脚本与运营手册（[NEWS_WORKFLOW.md](docs/NEWS_WORKFLOW.md)，含 mermaid 流程图、任务计划程序注册命令与首轮实调记录）。2026-09-01 首轮真实演练完成：三个代表信源（市场监管总局/巨潮/HNC）已启用，fetch→select→build 全链路在真实站点上验证通过（含列表页 title/月-日日期解析增强、HNC 改用 WordPress RSS、巨潮按 `parser_config` 关键词过滤，schema v16 `parser_config` 字段），当日无相关资讯、build 按需求诚实跳过。正式库已迁移至 v15 并导入 29 个白名单提案（全部停用，待人工确认启用）；首次真实抓取/成文/推送待名单确认、微信凭据与 Logo 就位后演练（[ADR-0014](docs/adr/0014-news-line-and-wechat-draft-publishing.md)）。
 
 行业信号向下游分叉为两条已确认的路径：每周“本周信号快报”做横向扫描、周度输出；另一路经人工确认选题后进入纵向深度研究，形成高价值文章。
 
@@ -29,7 +31,7 @@
 - 它不是 `earlydata-weekly` 的新模块，拥有独立的生命周期、数据、配置、命令和产物。
 - 任何共享模块抽取、跨项目状态复用或发布流程交接，都需要用户另行明确批准。
 - 选题包、研究任务书和文章型深度研究稿是不同产物；深度研究稿经过人工事实与编辑审阅后直接成为最终文章 Markdown。
-- 微信草稿箱与自动发布是已确认的后续扩展方向；在明确修改 AGENTS.md 边界并获得批准前，本仓库仍不包含任何微信写入或发布路径，定稿后由人工复制发布。
+- 微信草稿箱与自动发布已于 2026-08-31 修订 AGENTS.md 后获批，但仅限资讯自动线（[ADR-0014](docs/adr/0014-news-line-and-wechat-draft-publishing.md)）：白名单首次人工确认后，每日采集、成文、质检、推送草稿箱免人工运行；群发仍禁止；周报、深度研究等既有产物继续由人工复制发布。
 - 深度研究默认由操作者手动启动；可显式开启自动启动，但不能绕过研究任务书的人工确认。
 - 第一版优先保持简单：误建研究任务只取消并留痕，不支持任务合并、报告改挂或物理删除。
 - 公众号监测首先形成“行业信号卡”，不把有限的行业媒体来源称为完整“舆情分析”；选中的信号才继续生成选题。
@@ -86,6 +88,22 @@ uv sync --extra dev
 .\.venv\Scripts\nutrition-radar.exe research smoke-test-pi --live
 # 启动一个已人工确认的研究任务书，pi 检索公开网页并写回待审稿件：
 .\.venv\Scripts\nutrition-radar.exe research run --task-id 1 --live
+
+# 资讯自动线（Phase 4）白名单：导入 29 个默认停用的建议信源并查看：
+.\.venv\Scripts\nutrition-radar.exe news seed-sources
+.\.venv\Scripts\nutrition-radar.exe news list-sources
+# 操作者确认名单后逐条显式启用；启用后才会进入抓取范围：
+.\.venv\Scripts\nutrition-radar.exe news set-source-enabled --name "国家市场监督管理总局" --enable
+# 抓取已启用信源（真实外部请求必须显式 --live；产物存 var/raw/sites/ 并幂等入库）：
+.\.venv\Scripts\nutrition-radar.exe news fetch --live --lookback-hours 24
+# 确定性筛选分级（无 LLM、无网络）：五项入选条件 + 栏目 + P0–P3 + 去重，产出资讯源数据表：
+.\.venv\Scripts\nutrition-radar.exe news select
+.\.venv\Scripts\nutrition-radar.exe news list-items --selected-only
+# 成稿（LLM 逐条摘要需 --live 且 .env 配置 RADAR_LLM_*；产出本地 HTML/封面/源数据表/质检日志）：
+.\.venv\Scripts\nutrition-radar.exe news build --live
+# 推送草稿箱（双重人工门禁：--live 外呼确认 + --confirm 人工复查确认；每稿限一次）：
+.\.venv\Scripts\nutrition-radar.exe news publish --live --confirm --slug news-2026-09-01 --version 1
+# 每日无人值守链路（仅 fetch → select → build，永不含 publish）与运营手册见 docs/NEWS_WORKFLOW.md
 
 # 用配置的分析后端（DeepSeek）解读当期活跃行业信号的解读字段（真实调用需 --live）：
 # 规则继续负责聚类与初排；模型只填底层事件/共识/分歧/业务含义/数据缺口/受影响角色，
@@ -212,6 +230,7 @@ REDFOX_MAX_RETRIES=1
 - [每周横向信号快报与纵向深度研究双分支 ADR](docs/adr/0011-weekly-signal-brief-horizontal-scan.md)
 - [纵向深度研究改用 pi coding-agent ADR](docs/adr/0012-pi-agent-for-vertical-research.md)
 - [可发布周报文章与横向快报分离 ADR](docs/adr/0013-publishable-weekly-article.md)
+- [资讯自动线与微信草稿箱发布 ADR](docs/adr/0014-news-line-and-wechat-draft-publishing.md)
 - [先用本地 Excel Demo、后接 RedFox ADR](docs/adr/0006-local-xlsx-demo-before-redfox.md)
 - [单库监测期次隔离 ADR](docs/adr/0007-logical-monitoring-cycles.md)
 

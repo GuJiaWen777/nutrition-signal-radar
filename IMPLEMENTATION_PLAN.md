@@ -1,6 +1,6 @@
 # 营养健康行业信号雷达实施计划
 
-状态：`Implementation Started — P1 Source Registry / Sync / Weekly Signal Brief & Publishable Article Slices Ready; P2 Offline/Online Article-Draft Slices Ready; Phase 3 Operations Slices Confirmed (Not Started); Independent Repository Migrated`
+状态：`Implementation Started — P1 Source Registry / Sync / Weekly Signal Brief & Publishable Article Slices Ready; P2 Offline/Online Article-Draft Slices Ready; Phase 3 Operations Slices Confirmed (Not Started); Phase 4 P4-01–P4-07 News-Line Slices Implemented (Live Rehearsal Pending Whitelist Confirmation & WeChat Credentials); Independent Repository Migrated`
 基线日期：2026-08-15
 代码状态：独立脚手架、配置边界、`doctor`、SQLite schema v10、来源中立文章契约、本地 Excel 导入、规则主题聚合、双审阅队列、可编辑选题包、监测期次隔离、本期选题归档、研究任务书人工门禁及离线/在线文章稿件的版本化审阅/本地 Markdown 定稿切片已经完成；RedFox Phase 0 窄适配器和六账号数据可用性验证已完成；P1 来源注册表、人工启用门禁、增量同步、广域库只读搜索、“本周信号快报”横向扫描与 pi 生成“可发布周报文章”切片已经实现；真实公开网页研究 Agent 已通过 P2-02 烟雾测试并接入 `research run --live` 与 `weekly article generate --live`，深度研究正文升级为可直接发布契约
 
@@ -362,6 +362,73 @@ nutrition-signal-radar/
 - 发布效果回流：人工录入发布日期与阅读/点赞/分享数据，按主题与标题样式复盘，反哺信号排序与选题。
 - 自有电商数据接入：新增来源类型，人工导入 EarlyData 品类/搜索数据摘要，使信号卡与文章可引用独家数据点。
 
+### Phase 4：资讯自动线「营养健康行业资讯」（方向已确认，未开工）
+
+2026-08-31 用户确认 `docs/DSA自动化文章需求.docx` 的自动化资讯需求，并同步修订 AGENTS.md：解除微信发布/草稿箱路径禁令（群发仍禁止），批准只读参考 `D:\Earlydata\SentimentTracker` 的微信实现。边界、采集架构与发布方式见 [ADR-0014](docs/adr/0014-news-line-and-wechat-draft-publishing.md)。该线不使用 EarlyData 电商数据，也不以行业信号管线为主输入；与 Phase 3 的每日快报（P3-01）是不同产物，互不替代。
+
+#### P4-01 资讯白名单注册（切片已完成）
+
+- schema v12 新增 `news_sources` 与 `news_source_events` 表：五类信源（policy / disclosure / brand / expo / research）、抓取入口、抓取方式（html_list / api / rss）、默认 P0–P3 建议级与解析配置版本。
+- `nutrition-radar news seed-sources / list-sources / configure-source / set-source-enabled` 全部可运行；29 个种子信源（7 政策监管、3 法定披露、11 品牌与公司、5 展会主办方、3 科研行业组织）按需求文档建议导入，全部默认停用，`derived_from` 记录出处。
+- 人工确认名单并显式 `set-source-enabled --enable` 后才进入抓取范围；启用/停用与配置变更写审计事件（模式同来源注册表），种子不覆盖人工编辑。
+- 白名单首次人工确认是资讯线唯一固定的内容人工节点。
+
+切片退出标准：已满足。`test_news_registry.py` 覆盖种子幂等且默认停用、启用门禁与审计事件、字段校验与原地更新、种子尊重人工编辑、v11→v12 升级不丢数据、模块零网络请求与 CLI 全流程；既有 schema 版本断言同步更新，全量测试 161/161 通过。正式库尚未执行种子导入，等待操作者确认名单。
+
+#### P4-02 直采适配器（切片已完成）
+
+- 新增 `site_fetch_gateway.py`（无数据库写入、可注入 HTTP 会话）：`rss` 通用 RSS 2.0/Atom 解析；`html_list` 通用列表页解析（锚点文本 + 邻近日期关联、相对链接解析、同域过滤、script/style 剔除）；`api` 已实现巨潮 `hisAnnouncement/query` 公告查询（seDate 窗口、epoch 毫秒时间、adjunctUrl 补全），其余 API 源在启用实调前显式报"解析器尚未实现"并按失败隔离。
+- 日期归一统一为 CST `YYYY-MM-DD HH:MM:SS`；纯日期按当天 23:59:59 计，避免"当日日期早于窗口起点"被误丢；无日期条目计入 `skipped_no_date`，窗口外计入 `skipped_out_of_window`（资讯成文要求可核验日期，无日期不入库）。
+- 脱敏原始响应与 meta.json 存 `var/raw/sites/YYYY-MM-DD/<域名>/`（只存响应体与请求元信息，不含任何凭据），body SHA-256 作为批次指纹。
+- 新增 `news_fetch_service.py`：只处理 `list_enabled_news_sources`（人工启用门禁）；逐源失败隔离（抓取或入库失败记 `sync_health=error` 并写 `fetch_failed` 事件，不影响其他源）；条目经共享归一化文章契约幂等入库（账号名=信源名、segment=`news_source`、metadata 带类别/优先级/域名），进入开放期次文章池。
+- schema v12 的 `news_sources` 增加 `sync_health / last_fetched_at / last_item_at`；`record_news_source_health` 回写健康与最新条目时间；`news set-source-enabled --enable` 时健康置 `unknown`。
+- CLI `news fetch --live` 支持 `--lookback-hours`（默认 24）、`--max-items`（默认 30）、`--source` 按名过滤；无 `--live` 返回保护提示且退出码 2、不产生运行状态。Exa 兜底补捞与 pi 单条正文补全仍为 ADR-0014 中的后续辅助路径，未在本切片。
+
+切片退出标准：已满足。`test_site_fetch_gateway.py` 覆盖 RSS 窗口过滤与原始存档、HTML 列表相对链接/同域/日期关联、巨潮接口表单与标题清洗、未配置 API 解析器的显式失败、幂等入库与健康回写、跨源失败隔离、CLI 保护路径与 `--live` JSON 输出；全量测试 168/168 通过。真实站点抓取须由操作者启用信源后以 `news fetch --live` 显式验证（Phase 4 首次 live 演练待名单确认后进行）。
+
+#### P4-03 筛选分级与资讯源数据表（切片已完成）
+
+- schema v13 新增 `news_items` 表：每条已抓取的资讯文章一行，记录栏目（policy / brand_finance / expo / research）、P0–P3 优先级、入选与否、机器可读的落选理由码与分级依据，构成"资讯源数据表"产出物（`news list-items` 可查，含标题/来源/日期/URL/入选状态）。
+- 新增 `news_selection.py` 确定性规则引擎（无 LLM、无网络）：需求文档五项入选条件逐条落地——标题/日期/链接/正文或摘要完整性门槛（无日期条目在抓取层已被丢弃，此处为防御性兜底）、营养健康产业相关词命中、白名单内（按构造保证）、URL 与标题近似去重（NFKC 归一 + 0.92 相似度，只对已入选条目判重）、明确的动作信息（政策动作/公司动作/会议词）。每条入选与落选都带理由码（missing_date / not_relevant / duplicate_title 等）。
+- 栏目分类优先用关键词证据、缺省回退信源类别映射（法定披露→品牌与财报）；优先级按需求文档内容表判定：政策监管→P0、财报/融资并购→P1、常规品牌→P2、重点展会/科研→P2、一般预告→P3，依据写 `priority_reasons`。
+- `news select` 只评估未处理条目、可重复执行（每篇文章恰好评估一次）；入选不足 2 条时报告 `daily_eligible=false`，P4-04 据此自动转周报形态。
+- fetch 服务同步小修：API 类条目（如巨潮 PDF 公告）无摘要时，正文快照回退为公告标题，使完整性门槛对披露类条目成立。
+
+切片退出标准：已满足。`test_news_selection.py` 覆盖入选/落选与理由码、栏目与优先级判定、同稿近似去重、缺日期条目拦截、重复执行幂等、`daily_eligible` 阈值与 CLI select / list-items 输出；schema 版本断言同步至 v13，全量测试 172/172 通过。关键词表为 v1 规则，操作者可在实调后调整。
+
+#### P4-04 摘要与成稿（切片已完成）
+
+- schema v14 新增 `news_articles` 表：`<slug>/vNNN` 版本化记录每次成稿（daily/weekly 模式、条数、所用模型、产物路径与 manifest 校验和），同日重建递增版本、不覆盖旧版本。
+- 新增 `news_compose.py`：入选条目交给配置的分析后端（DeepSeek，OpenAI 兼容协议，注入式网关）按 JSON 契约逐条生成 120–180 字摘要与"对行业意味着什么"；系统提示与本地校验硬性执行需求红线——不补事实、无内部标记、无夸张词（爆款/颠覆/行业巨震）、无疾病治疗表述；格式或红线不合格有界重试（每条最多 3 次调用），仍不合格的条目剔除出文并记入 QC 日志。
+- 确定性模板组装需求文档的栏目结构（01 政策监管 / 02 品牌与财报 / 03 展会与产业活动 / 04 科研与原料，空栏目省略）＋导语、本期关键词（命中产业词频排序）、信息说明；标题形如"营养健康行业资讯｜XXXX"，周报形态固定为"本周营养健康行业资讯｜政策、财报与展会动态一览"。
+- 每次构建产出本地版本化产物（2026-09-01 确认本地产物先行，见 ADR-0014）：`news-article.html`（内联 CSS、Noto Sans SC 与既定品牌色，可直接粘贴公众号编辑器）、`news-article.md` 母稿、`source-table.csv` 资讯源数据表（含落选条目与"是否入选"标记，UTF-8 BOM 便于 Excel）、`qc-log.json` 质检日志（逐条摘要字数/字段完整性/违禁词 + 文章级条数/字数/红线检查）、`manifest.json`。微信草稿箱推送（P4-06）为独立后续切片。
+- 每日入选不足 2 条自动转 7 天周报窗口；周报窗口仍不足 2 条则跳过本次构建（status=skipped），不生成低价值内容。
+
+切片退出标准：已满足。`test_news_compose.py` 覆盖版本化本地产物与 HTML 品牌版式、周报回退与不足跳过、摘要契约重试与红线剔除、CLI `--live` 保护/未配置后端报错/注入网关的 live 路径；schema 版本断言同步至 v14，全量测试 176/176 通过。真实 LLM 摘要须配置 `.env` 后以 `news build --live` 显式演练。
+
+#### P4-05 排版与封面（切片已完成）
+
+- 正文 HTML 按需求文档第六节自建内联 CSS 模板（Noto Sans SC、既定品牌色、栏目样式与"查看原文 →"链接），推送前执行排版规范校验；SentimentTracker 只作技术参考，不复用其视觉与代码。
+- 封面双引擎（2026-09-01 确认，新增 `pillow` 依赖与 `news_cover.py`）：主路径为入库的版本化模板 `templates/cover.html` 填充字段后由本机 Edge/Chrome 无头截图（1800×766，白→浅蓝渐变、品牌绿装饰线、EARLYDATA 品牌字、系列名、标题两行内截断、"政策 · 品牌 · 展会｜日期"元信息）；浏览器不可用或截图尺寸异常时自动回退 PIL 渲染。渲染引擎记录进 manifest（`html_browser` / `pil_fallback`），HTML 预览文件（`cover.html`）随产物导出；可用 `RADAR_BROWSER_PATH` 指定浏览器路径。模板改动=代码改动，保证封面完全统一；不允许运行时让 LLM 即兴生成封面。
+- EarlyData 官方 Logo 放置于 `var/assets/earlydata-logo.png` 时自动嵌入；未放置时封面正常生成、manifest 记录 `logo not configured`，绝不自动抓取第三方 Logo。封面渲染失败不中断构建，仅记入 manifest。
+
+切片退出标准：已满足。`test_news_cover.py` 覆盖模板字段填充与转义、精确尺寸与有无 Logo 渲染、无浏览器时 PIL 回退、`RADAR_BROWSER_PATH` 探测；本机已实测 Edge 无头截图产出 1800×766 PNG。
+
+#### P4-06 微信草稿箱网关（切片已完成，待凭据后实调验证）
+
+- 新增 `wechat_gateway.py`：access token → 封面永久素材（`material/add_material`）→ 草稿箱（`draft/add`），参考 ADR-0014 批准的历史 Weekly Publisher 参考实现并以本仓库网关/错误约定重写；凭据仅经 `.env`（`WECHAT_APP_ID`/`WECHAT_APP_SECRET`），错误信息对密钥脱敏。
+- `news publish` 执行**双重人工门禁**（2026-09-01 用户确认）：必须同时携带 `--live`（外呼确认）与 `--confirm`（人工复查本地产物后的决策确认），缺一即拒绝；每日调度链不含 publish。每篇成稿只允许推送一次，成功后 `news_articles` 记录 `wechat_media_id` 与推送时间（schema v15），重复执行被拒绝，不产生重复草稿。
+- 群发端点全面禁止：边界测试断言微信 API 引用只允许出现在 `wechat_gateway.py`，且 `masssend/sendall/freepublish` 等标记在源码任何位置都不出现。
+- 看板外发布到关注者的动作（定时发布等）由操作者在公众号后台人工完成。
+
+切片退出标准：已满足。`test_wechat_gateway.py` 覆盖三端点调用顺序与载荷、错误脱敏、缺凭据报错、CLI 双门禁（无 `--live`/无 `--confirm` 均拒绝）、成功推送落库与重复推送拒绝；全部为 mock，无真实微信请求。真实推送待凭据配置后由操作者显式执行。
+
+#### P4-07 调度与验收（脚本与手册已交付，任务注册由操作者执行）
+
+- `scripts/news_daily.ps1`：每日链路 `news fetch --live --lookback-hours 24` → `news select` → `news build --live`，不含 publish；`docs/NEWS_WORKFLOW.md` 给出任务计划程序注册示例（每日 08:30）与排障手册。
+- 验收对照需求文档第九节：每条资讯有链接/机构/日期（筛选门槛强制）、无电商数据、无无出处事实（红线拦截）、封面与版式统一（模板化）、白名单确认后每日链路免人工、不足 2 条不强更（自动转周报/跳过）。
+- 二期事项：高优先级来源 2–4 小时加密抓取（追加任务计划程序触发器即可）；Exa 兜底补捞与 pi 单条正文补全（`EXA_API_KEY` 未配置，暂缓）。
+
 ## 6. 测试策略
 
 | 层级 | 重点 |
@@ -371,11 +438,13 @@ nutrition-signal-radar/
 | 适配器测试 | 固定 RedFox 响应、分页、超时、错误、正文缺失；假 Agent 结构化输出 |
 | API 测试 | 本地 JSON API、非法状态转换、过大请求、稳定详情链接 |
 | 端到端测试 | 六账号真实探测；一次周度选题审阅；0.2 的一次深度研究稿修订与最终文章确认闭环 |
-| 隔离回归 | 变更只位于本仓库；不读写历史项目运行状态；无微信 API 调用 |
+| 隔离回归 | 变更只位于本仓库；不读写历史项目运行状态；默认测试无真实微信 API 调用（资讯线微信网关全程 mock） |
 
 真实外部调用不进入默认测试套件，必须通过显式标记或命令启动。
 
 ## 7. 第一版明确不做
+
+以下为第一版（0.1/0.2）的范围裁决，作为历史记录保留；其中微信草稿箱发布禁令已由 2026-08-31 的 AGENTS.md 修订与 [ADR-0014](docs/adr/0014-news-line-and-wechat-draft-publishing.md) 在资讯自动线（Phase 4）范围内解除，群发仍全面禁止，其余产物线维持人工发布。
 
 - 修改或扩展 `earlydata-weekly` 命令、状态机、审核页或发布逻辑。
 - 微信公众号草稿生成、上传或群发。
@@ -412,5 +481,6 @@ nutrition-signal-radar/
 7. `P1-01` 可编辑来源配置、`P1-02` 增量同步与账号健康、`P1-07` 的“本周信号快报”切片已实现并通过假网关测试；仍需操作者确认四个“建议启用”账号及庶正康讯、Bonny营养领航的补录策略后，用 RedFox 真实数据演练并完善 `P1-03` 至 `P1-08`。
 8. 已按用户确认完成 `P2-01` 的“任务书待确认 → 待启动”纵向切片，以及明确标记为未联网的 `P2-03/P2-04` 离线稿件工作流切片；真实联网研究仍须先完成 `P2-02` 的公开网页来源烟雾测试，之后再以真实来源重跑 P2-03/P2-04。
 9. `Phase 3` 自有公众号运营切片已确认方向、尚未开工：由操作者选择从每日快报（`P3-01`）或多候选标题 + EarlyData 参数包（`P3-02`/`P3-03`）起步；开工前先补对应 ADR，只作用于开放期次的产出切片，不触碰微信发布边界。
+10. `Phase 4` 资讯自动线（[ADR-0014](docs/adr/0014-news-line-and-wechat-draft-publishing.md)）`P4-01`–`P4-07` 切片已全部实现：`news fetch --live` → `news select` → `news build --live` 产出本地 HTML/封面/源数据表/质检日志，`scripts/news_daily.ps1` + `docs/NEWS_WORKFLOW.md` 支持每日无人值守运行；`news publish --live --confirm` 推送草稿箱为人工双门禁动作。当前待办：正式库白名单人工确认与启用（29 个提案已导入、全部停用）→ 首次全链路真实验证；微信凭据配置后才可实调推送；EarlyData Logo 原图放入 `var/assets/` 后封面自动带上。
 
-下一步由操作者决定推进数据侧还是研究侧：数据侧应先人工确认四个“建议启用”账号，并决定庶正康讯的补充来源与 Bonny营养领航的准确账号，再开始真实 `sync` 演练并完善 `P1-03` 至 `P1-08`；研究侧需要先明确可公开联网、可返回具体 URL 的 Agent 后执行 `P2-02` 技术烟雾测试。离线文章 Demo 继续只用于验证人工编辑链，不得替代真实来源研究；两条路径都不得重写当前聚类、信号和看板流程，也不得自动发布。运营侧的 `Phase 3` 起步选择见第 9 条。
+下一步由操作者决定推进数据侧还是研究侧：数据侧应先人工确认四个“建议启用”账号，并决定庶正康讯的补充来源与 Bonny营养领航的准确账号，再开始真实 `sync` 演练并完善 `P1-03` 至 `P1-08`；研究侧需要先明确可公开联网、可返回具体 URL 的 Agent 后执行 `P2-02` 技术烟雾测试。离线文章 Demo 继续只用于验证人工编辑链，不得替代真实来源研究；两条路径都不得重写当前聚类、信号和看板流程，也不得自动发布。运营侧的 `Phase 3` 起步选择见第 9 条，资讯自动线的开工顺序见第 10 条。
