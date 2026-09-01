@@ -51,8 +51,8 @@ _MIN_ITEMS_FOR_DAILY = 3
 _TARGET_ITEMS = 5
 _WEEKLY_LOOKBACK_DAYS = 7
 _SUMMARY_MIN_CHARS = 100
-_SUMMARY_MAX_CHARS = 220
-_IMPLICATION_MAX_CHARS = 120
+_SUMMARY_MAX_CHARS = 180
+_IMPLICATION_MAX_CHARS = 80
 _COMPOSE_MAX_RETRIES = 2
 # 需求文档内容红线：不得出现的夸张词与疾病治疗类表述。
 _FORBIDDEN_TERMS: tuple[str, ...] = (
@@ -63,10 +63,16 @@ _INTERNAL_MARKERS = ("待补证", "内部状态", "人工审阅", "未核实", "
 _SYSTEM_PROMPT = (
     "你是营养健康行业资讯编辑。你只能根据用户提供的已抓取原始内容生成摘要，"
     "不得补充未出现的事实、数据或金额；不得把预测写成事实；不得把征求意见稿写成正式政策；"
-    "不得对保健食品作疾病治疗类表述；不得使用“爆款”“颠覆”“行业巨震”等夸张词。"
-    "必须输出 JSON 对象：{\"summary\": \"120-180字中文摘要\", "
-    "\"implication\": \"对行业意味着什么（仅限基于原文的客观说明，不超过80字）\", "
-    "\"keywords\": [\"2-3个行业关键词\"]}。"
+    "不得对保健食品作疾病治疗类表述；不得使用“爆款”“颠覆”“行业巨震”等夸张词；"
+    "摘要第一句必须写清主体和动作，禁止“反映出”“有助于激发”等空泛套话。"
+    "必须输出 JSON 对象：{\"summary\": \"100-150字中文摘要：第一句写清主体与动作，"
+    "只保留关键数字与期限，删掉一切套话\", "
+    "\"implication\": \"对行业意味着什么（仅限基于原文的客观说明，不超过60字）\", "
+    "\"keywords\": [\"2-3个行业关键词\"], "
+    "\"key_facts\": [{\"kind\": \"number|deadline|entity\", "
+    "\"value\": \"原文中出现的原文片段（数字、日期或主体名，必须逐字来自原文）\", "
+    "\"note\": \"一句话说明（不超过30字）\"}]。key_facts 可为空数组；"
+    "value 逐字复制原文片段，禁止改写。"
 )
 _SECTION_ORDER = ("policy", "brand_finance", "expo", "research")
 _BRAND_COLORS = {
@@ -107,6 +113,7 @@ class ComposedItem:
     summary: str
     implication: str
     keywords: tuple[str, ...]
+    key_facts: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -201,6 +208,7 @@ def build_news_article(
         mode = "weekly"
         slug = f"news-weekly-{(current_time - timedelta(days=6)):%Y%m%d}"
 
+    insights = _compose_insights(gateway, composed)
     title = _build_title(mode, composed)
     title_provenance = "mechanical"
     if mode == "daily" and len(composed) and len(_focus_from_title(composed[0].title)) > _TITLE_SOFT_LIMIT:
@@ -217,11 +225,12 @@ def build_news_article(
             )
             title_provenance = "mechanical_truncated"
     article = _ArticleDocument(
-        mode=mode, title=title, items=composed, generated_at=current_time
+        mode=mode, title=title, items=composed, insights=insights,
+        generated_at=current_time,
     )
     markdown = _render_markdown(article)
     html_text = _render_html(article)
-    qc = _quality_checks(mode, composed, excluded, markdown)
+    qc = _quality_checks(mode, composed, excluded, markdown, insights=insights)
 
     return _write_build(
         database_path,
@@ -233,6 +242,7 @@ def build_news_article(
         excluded=excluded,
         markdown=markdown,
         html_text=html_text,
+        insights=insights,
         qc=qc,
         llm_model=llm_model,
         title_provenance=title_provenance,
@@ -415,9 +425,16 @@ def _summarize(
         parsed = _parse_contract(result.content)
         if parsed is None:
             continue
-        summary, implication, keywords = parsed
+        summary, implication, keywords, raw_facts = parsed
         if _contains_forbidden(summary) or _contains_forbidden(implication):
             continue
+        # 反虚构硬校验：value 必须逐字出现在已抓取原文中，否则丢弃。
+        original_text = str(item.get("content_snapshot") or "") + str(item["title"])
+        verified_facts = tuple(
+            fact
+            for fact in raw_facts
+            if fact["value"] and fact["value"] in original_text
+        )
         return ComposedItem(
             article_id=int(item["article_id"]),
             source_name=str(item["source_name"]),
@@ -429,11 +446,14 @@ def _summarize(
             summary=summary,
             implication=implication,
             keywords=keywords,
+            key_facts=verified_facts,
         )
     return None
 
 
-def _parse_contract(content: str) -> tuple[str, str, tuple[str, ...]] | None:
+def _parse_contract(
+    content: str,
+) -> tuple[str, str, tuple[str, ...], list[dict[str, str]]] | None:
     try:
         payload = json.loads(content)
     except json.JSONDecodeError:
@@ -454,7 +474,19 @@ def _parse_contract(content: str) -> tuple[str, str, tuple[str, ...]] | None:
         return None
     if any(marker in summary or marker in implication for marker in _INTERNAL_MARKERS):
         return None
-    return summary, implication, keywords[:3]
+    raw_facts = payload.get("key_facts")
+    key_facts: list[dict[str, str]] = []
+    if isinstance(raw_facts, list):
+        for fact in raw_facts[:3]:
+            if not isinstance(fact, dict):
+                continue
+            value = str(fact.get("value") or "").strip()
+            note = str(fact.get("note") or "").strip()
+            kind = str(fact.get("kind") or "fact").strip()
+            if not value or len(value) > 60 or len(note) > 60:
+                continue
+            key_facts.append({"kind": kind[:20], "value": value, "note": note})
+    return summary, implication, keywords[:3], key_facts
 
 
 def _contains_forbidden(text: str) -> bool:
@@ -470,6 +502,7 @@ class _ArticleDocument:
     mode: str
     title: str
     items: list[ComposedItem]
+    insights: tuple[str, ...]
     generated_at: datetime
 
 
@@ -516,6 +549,46 @@ def _rewrite_title_with_model(
             continue
         return title
     return None
+
+
+_INSIGHTS_SYSTEM_PROMPT = (
+    "你是营养健康行业资讯编辑。基于本期已入选的资讯条目（标题与摘要如下），"
+    "提炼 1-3 条跨条目观察：只能归纳已给内容中的共性、联动或时间线，"
+    "不得引入任何外部信息或预测；每条不超过 60 字；不得使用夸张表述。"
+    '输出 JSON 对象：{"insights": ["观察一", "观察二"]}。'
+)
+
+
+def _compose_insights(gateway, composed: list[ComposedItem]) -> tuple[str, ...]:
+    """One cross-item analysis call over this issue's own items only."""
+
+    if len(composed) < 2:
+        return ()
+    lines = chr(10).join(
+        f"- {item.title}：{item.summary}" for item in composed
+    )
+    user_prompt = f"本期条目：\n{lines}\n请按系统约定输出 JSON。"
+    for _ in range(2):
+        try:
+            result = gateway.analyze(_INSIGHTS_SYSTEM_PROMPT, user_prompt, json_object=True)
+        except Exception:
+            return ()
+        try:
+            payload = json.loads(result.content)
+        except json.JSONDecodeError:
+            continue
+        raw = payload.get("insights") if isinstance(payload, dict) else None
+        if not isinstance(raw, list):
+            continue
+        insights = tuple(
+            text.strip()
+            for text in (str(entry) for entry in raw)
+            if 15 <= len(text.strip()) <= 90
+            and not _contains_forbidden(text)
+            and not any(marker in text for marker in _INTERNAL_MARKERS)
+        )
+        return insights[:3]
+    return ()
 
 
 def _build_title(
@@ -587,6 +660,11 @@ def _render_markdown(article: _ArticleDocument) -> str:
         _lead_paragraph(article),
         "",
     ]
+    if article.insights:
+        lines.append("## 本期速览")
+        lines.append("")
+        lines.extend(f"- {insight}" for insight in article.insights)
+        lines.append("")
     for index, (section, members) in enumerate(_grouped_sections(article.items), start=1):
         lines.append(f"## {index:02d}｜{section_label(section)}")
         lines.append("")
@@ -594,6 +672,9 @@ def _render_markdown(article: _ArticleDocument) -> str:
             lines.append(f"### {item.title}")
             lines.append("")
             lines.append(item.summary)
+            lines.append("")
+            for fact in item.key_facts:
+                lines.append(f"关键信息：{fact['value']}（{fact['note']}）")
             lines.append("")
             lines.append(f"对行业意味着什么：{item.implication}")
             lines.append("")
@@ -654,7 +735,13 @@ def _render_html(article: _ArticleDocument) -> str:
                 f'line-height:1.6;">{esc(item.title)}</p>'
                 f'<p style="margin:0 0 10px;font-size:16px;color:{_BRAND_COLORS["body"]};line-height:1.9;">'
                 f"{esc(item.summary)}</p>"
-                f'<section style="margin:0 0 10px;padding:10px 14px;background:{_BRAND_COLORS["panel"]};'
+                + "".join(
+                    f'<p style="margin:0 0 6px;font-size:14px;color:{_BRAND_COLORS["body"]};'
+                    f'line-height:1.8;">关键信息：<strong>{esc(fact["value"])}</strong>'
+                    f"（{esc(fact['note'])}）</p>"
+                    for fact in item.key_facts[:2]
+                )
+                + f'<section style="margin:0 0 10px;padding:10px 14px;background:{_BRAND_COLORS["panel"]};'
                 f'border-left:3px solid {_BRAND_COLORS["green"]};">'
                 f'<p style="margin:0;font-size:14px;color:{_BRAND_COLORS["body"]};line-height:1.8;">'
                 f"<strong>对行业意味着什么：</strong>{esc(item.implication)}</p></section>"
@@ -687,7 +774,19 @@ def _render_html(article: _ArticleDocument) -> str:
         f'<section style="margin:0 18px 22px;padding:14px 16px;background:{_BRAND_COLORS["panel"]};'
         f'border-radius:6px;"><p style="margin:0;font-size:16px;color:{_BRAND_COLORS["body"]};'
         f'line-height:1.8;">{esc(_lead_paragraph(article))}</p></section>'
-        f'<section style="padding:0 18px;">{"".join(sections_html)}</section>'
+        + (
+            f'<section style="margin:0 18px 22px;padding:0 16px;">'
+            f'<p style="margin:0 0 6px;font-size:15px;font-weight:700;'
+            f'color:{_BRAND_COLORS["title"]};">本期速览</p>'
+            + "".join(
+                f'<p style="margin:0 0 6px;font-size:14px;color:{_BRAND_COLORS["body"]};'
+                f'line-height:1.8;">· {esc(insight)}</p>'
+                for insight in article.insights
+            )
+            + "</section>"
+            if article.insights else ""
+        )
+        + f'<section style="padding:0 18px;">{"".join(sections_html)}</section>'
         f'<section style="padding:4px 18px 8px;">'
         f'<p style="margin:0 0 8px;font-size:15px;font-weight:700;color:{_BRAND_COLORS["title"]};">'
         f"本期关键词</p><p style=\"margin:0;line-height:2;\">{keywords}</p></section>"
@@ -707,6 +806,7 @@ def _quality_checks(
     composed: list[ComposedItem],
     excluded: list[dict[str, str]],
     markdown: str,
+    insights: tuple[str, ...] = (),
 ) -> dict[str, object]:
     text_length = len(re.sub(r"[#>*\[\]()|！？\s-]", "", markdown))
     item_checks = [
@@ -734,6 +834,10 @@ def _quality_checks(
          "detail": "、".join(found_forbidden) if found_forbidden else "未发现夸张词或疾病治疗表述"},
         {"check": "sources_complete", "passed": all(item["fields_complete"] for item in item_checks),
          "detail": "每条均有机构、日期与链接"},
+        {"check": "key_facts_verified", "passed": True,
+         "detail": f"关键信息 {sum(len(item.key_facts) for item in composed)} 条（已在抽取时经原文子串校验）"},
+        {"check": "insights_count", "passed": True,
+         "detail": f"本期速览 {len(insights)} 条（仅基于本期条目）"},
     ]
     return {
         "item_checks": item_checks,
@@ -754,6 +858,7 @@ def _write_build(
     excluded: list[dict[str, str]],
     markdown: str,
     html_text: str,
+    insights: tuple[str, ...],
     qc: dict[str, object],
     llm_model: str,
     title_provenance: str,
@@ -793,6 +898,7 @@ def _write_build(
                 "mode": mode,
                 "title": title,
                 "title_provenance": title_provenance,
+                "insights": list(insights),
                 "llm_model": llm_model,
                 "items": [item.__dict__ for item in composed],
                 "excluded_items": excluded,

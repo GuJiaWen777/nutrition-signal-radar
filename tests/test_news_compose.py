@@ -25,7 +25,7 @@ _SUMMARY_SENTENCE = (
     "本次监管动态持续影响营养健康行业的合规要求与竞争格局，"
     "相关企业需要关注后续执行细则并评估自身注册、备案与宣传策略的调整空间。"
 )
-VALID_SUMMARY = _SUMMARY_SENTENCE * 3
+VALID_SUMMARY = _SUMMARY_SENTENCE * 2
 VALID_IMPLICATION = "行业将面临更明确的合规边界，注册、备案与宣传策略需相应调整。"
 
 
@@ -574,3 +574,59 @@ def test_over_limit_title_uses_model_rewrite_with_mechanical_fallback(
     )
     assert fallback.status == "built"
     assert fallback.title.endswith("…")
+
+
+def test_key_facts_and_insights_render(tmp_path: Path, monkeypatch) -> None:
+    """key_facts 进条目（原文回验后），速览进导语后（仅基于本期条目）。"""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _seed_four_selected_items(database_path)
+
+    import nutrition_signal_radar.news_compose as compose
+
+    def responder(user_prompt: str) -> str:
+        if "本期条目" in user_prompt:
+            import json as _json
+            return _json.dumps({"insights": ["本期多条动态集中在保健食品监管与合规环节"]})
+        return _valid_payload()
+
+    class InsightGateway(FakeComposeGateway):
+        def __init__(self) -> None:
+            super().__init__(responder)
+
+    # 第一条（监管源）的原文里含可回验的日期片段
+    monkeypatch.setattr(
+        compose, "_summarize",
+        lambda gateway, item: compose.ComposedItem(
+            article_id=int(item["article_id"]),
+            source_name=str(item["source_name"]),
+            section=str(item["section"]),
+            priority=str(item["priority"]),
+            title=str(item["title"]),
+            url=str(item["url"] or "") or None,
+            published_at=str(item["published_at"] or "") or None,
+            summary="保健食品领域出现新的监管动作，相关主体需要关注后续执行细则与合规要求变化。",
+            implication="监管节奏加快，注册与宣传策略需相应调整。",
+            keywords=("保健食品", "合规"),
+            key_facts=({"kind": "entity", "value": str(item["title"])[:12], "note": "主体"} ,),
+        ),
+    )
+    monkeypatch.setattr(compose, "_rewrite_title_with_model", lambda gw, title, limit: None)
+
+    result = compose.build_news_article(
+        database_path,
+        InsightGateway(),
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        llm_model="deepseek-chat", now=NOW,
+    )
+
+    assert result.status == "built"
+    build_dir = Path(result.detail)
+    html_text = (build_dir / "news-article.html").read_text(encoding="utf-8")
+    assert "本期速览" in html_text
+    assert "保健食品监管与合规环节" in html_text
+    markdown = (build_dir / "news-article.md").read_text(encoding="utf-8")
+    assert "## 本期速览" in markdown
+    assert "关键信息：" in markdown
+    manifest = json.loads((build_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["insights"]
