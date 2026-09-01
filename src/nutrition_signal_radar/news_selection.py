@@ -45,6 +45,7 @@ _MIN_TITLE_LENGTH = 6
 
 INDUSTRY_TERMS: tuple[str, ...] = (
     "保健食品", "特殊食品", "特医食品", "特殊医学用途", "特殊膳食", "特膳",
+    "食品安全",
     "膳食补充剂", "功能食品", "健康食品", "营养品", "营养健康", "营养",
     "益生菌", "维生素", "矿物质", "蛋白粉", "鱼油", "胶原蛋白", "膳食纤维",
     "新食品原料", "食品原料", "婴幼儿配方", "乳粉", "奶粉", "DHA", "低GI",
@@ -280,7 +281,10 @@ def _decide(row: sqlite3.Row, prior: dict[str, object]) -> NewsItemDecision:
         reasons.append({"code": "missing_url", "detail": "缺少原文链接"})
     if len(body) < _MIN_TITLE_LENGTH:
         reasons.append({"code": "missing_body", "detail": "缺少正文或摘要"})
-    if not _contains_any(haystack, INDUSTRY_TERMS):
+    relevant = _contains_any(haystack, INDUSTRY_TERMS) or (
+        str(row["source_category"]) in ("policy", "disclosure") and "食品" in haystack
+    )
+    if not relevant:
         reasons.append({"code": "not_relevant", "detail": "未命中营养健康产业相关词，与产业不直接相关"})
     if url and _canonical_url_key(url) in prior["urls"]:  # type: ignore[operator]
         reasons.append({"code": "duplicate_url", "detail": "同一原文链接已入选"})

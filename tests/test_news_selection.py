@@ -276,3 +276,35 @@ def test_selection_catches_date_prefixed_repost_variants(tmp_path: Path) -> None
     )
     assert duplicate.selected is False
     assert duplicate.rejection_reasons[0]["code"] == "duplicate_title"
+
+
+def test_policy_sources_count_bare_food_terms_as_relevant(tmp_path: Path) -> None:
+    """食品安全/食品抽检 is in the docx scope even without 保健/营养 keywords."""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+    _enable(
+        database_path,
+        name="测试监管网",
+        domain="example.gov.cn",
+        category="policy",
+        entry_url="https://www.example.gov.cn/feed.xml",
+        fetch_kind="rss",
+        default_priority="P0",
+    )
+    recent = (NOW - timedelta(hours=2)).astimezone(CST)
+    feed = f"""<?xml version="1.0"?>
+    <rss version="2.0"><channel><title>t</title>
+      <item><title>监管部门开展食品安全专项检查行动</title>
+        <link>https://www.example.gov.cn/a/1</link>
+        <pubDate>Mon, {recent:%d %b %Y} 08:00:00 +0800</pubDate>
+        <description>针对食品生产企业的专项检查正式启动。</description></item>
+    </channel></rss>"""
+    _ingest_rss(database_path, feed, entry_url="https://www.example.gov.cn/feed.xml", name="测试监管网")
+
+    report = evaluate_pending_news_articles(database_path)
+
+    assert report.selected == 1
+    item = list_news_items(database_path, selected_only=True)[0]
+    assert item.section == "policy"
+    assert item.priority == "P0"
