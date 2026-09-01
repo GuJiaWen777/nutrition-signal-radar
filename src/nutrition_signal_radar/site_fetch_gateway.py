@@ -28,7 +28,10 @@ from .news_registry import NewsSource
 
 
 FETCH_TIMEOUT_SECONDS = 30.0
-USER_AGENT = "EarlyDataNewsRadar/0.1 (local operator tool; contact: operator)"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 EarlyDataNewsRadar/0.1"
+)
 _CST = timezone(timedelta(hours=8), name="Asia/Shanghai")
 _DATE_PATTERN = re.compile(
     r"\d{4}-\d{1,2}-\d{1,2}"
@@ -171,7 +174,24 @@ def _checked_get(session: HttpSession, url: str) -> tuple[str, bytes, int]:
         raise SiteFetchError(f"抓取请求失败：{url}（{exc}）") from exc
     if response.status_code >= 400:
         raise SiteFetchError(f"抓取返回 HTTP {response.status_code}：{url}")
-    return response.text, response.content, response.status_code
+    return _decode_text(response), response.content, response.status_code
+
+
+def _decode_text(response: object) -> str:
+    """Decode with declared charset; many Chinese gov sites serve GBK without
+    a charset header, in which case fall back to apparent encoding."""
+
+    text = response.text  # type: ignore[attr-defined]
+    headers = getattr(response, "headers", None)
+    content_type = str(headers.get("content-type", "")) if headers is not None else ""
+    if "charset" not in content_type.lower():
+        apparent = getattr(response, "apparent_encoding", None)
+        if apparent:
+            try:
+                text = response.content.decode(apparent, errors="replace")  # type: ignore[attr-defined]
+            except (LookupError, ValueError):
+                pass
+    return text
 
 
 def _slugify_domain(domain: str) -> str:
