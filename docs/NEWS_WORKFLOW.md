@@ -106,6 +106,15 @@ schtasks /Create /TN "EarlyDataNewsDaily" /SC DAILY /ST 08:30 `
 
 启用策略：仅启用"解析器可用"名单（当前 7 个中除科拓生物/康恩贝外的 5 个 + 已启用 3 个），其余源在完成逐站调优并复验 `parser_ok` 前保持停用。
 
+### 5.2 浏览器渲染接入（2026-09-01 第二轮）
+
+对 JS 渲染站新增 Playwright（`channel="msedge"` 复用系统 Edge，免浏览器下载）渲染后端：`html_list` 源在 `parser_config` 配 `{"render":"browser","proxy":"direct","wait_seconds":2}` 即启用。要点：
+
+- **代理按源可配**：`proxy:"direct"` 强制直连（国内站在本机代理客户端挂掉时会全挂），默认继承系统代理（国外站 ADM/Probi 等需要）；`RADAR_BROWSER_PROXY` 可全局覆盖；
+- 等待策略：`domcontentloaded` + 默认 2 秒沉淀，可选 `wait_selector`/`wait_seconds`；
+- 静态列表仍是第一跳，浏览器只是 JS 站的渲染后端；日期解析新增"锚点文本内日期"兜底（卡片式列表）；
+- 第二轮结果：中国营养学会转 `parser_ok`（3 条带日期）；WonderLab 403 解除、科拓生物/康恩贝可渲染；上海/北京市局等首页确无日期列表，需逐站找真实栏目页——长尾调参继续，调好一个启用一个。
+
 ## 6. 明确不做
 
 - 任何群发路径；
