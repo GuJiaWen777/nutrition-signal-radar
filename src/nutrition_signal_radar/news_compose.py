@@ -52,7 +52,7 @@ _TARGET_ITEMS = 5
 _WEEKLY_LOOKBACK_DAYS = 7
 _SUMMARY_MIN_CHARS = 100
 _SUMMARY_MAX_CHARS = 180
-_IMPLICATION_MAX_CHARS = 80
+_IMPLICATION_MAX_CHARS = 45
 _COMPOSE_MAX_RETRIES = 2
 # 需求文档内容红线：不得出现的夸张词与疾病治疗类表述。
 _FORBIDDEN_TERMS: tuple[str, ...] = (
@@ -67,12 +67,14 @@ _SYSTEM_PROMPT = (
     "摘要第一句必须写清主体和动作，禁止“反映出”“有助于激发”等空泛套话。"
     "必须输出 JSON 对象：{\"summary\": \"100-150字中文摘要：第一句写清主体与动作，"
     "只保留关键数字与期限，删掉一切套话\", "
-    "\"implication\": \"对行业意味着什么（仅限基于原文的客观说明，不超过60字）\", "
+    "\"implication\": \"对行业意味着什么（仅限基于原文的客观说明，不超过45字）\", "
     "\"keywords\": [\"2-3个行业关键词\"], "
     "\"key_facts\": [{\"kind\": \"number|deadline|entity\", "
     "\"value\": \"原文中出现的原文片段（数字、日期或主体名，必须逐字来自原文）\", "
     "\"note\": \"一句话说明（不超过30字）\"}]。key_facts 可为空数组；"
     "value 逐字复制原文片段，禁止改写。"
+    "\"headline\": \"用于正文展示的新闻标题（不超过30字）：若原标题含【日期】前缀、"
+    "竖线分段等编辑痕迹，改写为干净的新闻标题；若原标题本身干净则逐字返回；不得新增事实。\""
 )
 _SECTION_ORDER = ("policy", "brand_finance", "expo", "research")
 _BRAND_COLORS = {
@@ -113,6 +115,7 @@ class ComposedItem:
     summary: str
     implication: str
     keywords: tuple[str, ...]
+    display_title: str = ""
     key_facts: tuple[dict[str, str], ...] = ()
 
 
@@ -211,7 +214,7 @@ def build_news_article(
     insights = _compose_insights(gateway, composed)
     title = _build_title(mode, composed)
     title_provenance = "mechanical"
-    if mode == "daily" and len(composed) and len(_focus_from_title(composed[0].title)) > _TITLE_SOFT_LIMIT:
+    if mode == "daily" and len(composed) and len(_focus_from_title(composed[0].display_title or composed[0].title)) > _TITLE_SOFT_LIMIT:
         # Over-limit headline: prefer a model compression of the original
         # (no new facts allowed), mechanical truncation stays the fallback.
         rewritten = _rewrite_title_with_model(gateway, composed[0].title, _TITLE_SOFT_LIMIT)
@@ -425,7 +428,7 @@ def _summarize(
         parsed = _parse_contract(result.content)
         if parsed is None:
             continue
-        summary, implication, keywords, raw_facts = parsed
+        summary, implication, keywords, raw_facts, headline = parsed
         if _contains_forbidden(summary) or _contains_forbidden(implication):
             continue
         # 反虚构硬校验：value 必须逐字出现在已抓取原文中，否则丢弃。
@@ -441,6 +444,7 @@ def _summarize(
             section=str(item["section"]),
             priority=str(item["priority"]),
             title=str(item["title"]),
+            display_title=headline or str(item["title"]),
             url=str(item["url"] or "").strip() or None,
             published_at=str(item["published_at"] or "").strip() or None,
             summary=summary,
@@ -453,7 +457,7 @@ def _summarize(
 
 def _parse_contract(
     content: str,
-) -> tuple[str, str, tuple[str, ...], list[dict[str, str]]] | None:
+) -> tuple[str, str, tuple[str, ...], list[dict[str, str]], str] | None:
     try:
         payload = json.loads(content)
     except json.JSONDecodeError:
@@ -462,6 +466,7 @@ def _parse_contract(
         return None
     summary = str(payload.get("summary") or "").strip()
     implication = str(payload.get("implication") or "").strip()
+    headline = str(payload.get("headline") or "").strip()
     raw_keywords = payload.get("keywords")
     keywords = (
         tuple(str(word).strip() for word in raw_keywords if str(word).strip())
@@ -483,10 +488,13 @@ def _parse_contract(
             value = str(fact.get("value") or "").strip()
             note = str(fact.get("note") or "").strip()
             kind = str(fact.get("kind") or "fact").strip()
-            if not value or len(value) > 60 or len(note) > 60:
+            if not value or len(value) > 60 or len(note) > 24:
                 continue
             key_facts.append({"kind": kind[:20], "value": value, "note": note})
-    return summary, implication, keywords[:3], key_facts
+    if headline and (6 <= len(headline) <= 40):
+        if not any(marker in headline for marker in _INTERNAL_MARKERS) and "【" not in headline:
+            return summary, implication, keywords[:3], key_facts, headline
+    return summary, implication, keywords[:3], key_facts, ""
 
 
 def _contains_forbidden(text: str) -> bool:
@@ -583,7 +591,7 @@ def _compose_insights(gateway, composed: list[ComposedItem]) -> tuple[str, ...]:
         insights = tuple(
             text.strip()
             for text in (str(entry) for entry in raw)
-            if 15 <= len(text.strip()) <= 90
+            if 15 <= len(text.strip()) <= 50
             and not _contains_forbidden(text)
             and not any(marker in text for marker in _INTERNAL_MARKERS)
         )
@@ -596,7 +604,7 @@ def _build_title(
 ) -> str:
     if mode == "weekly":
         return "本周营养健康行业资讯｜政策、财报与展会动态一览"
-    base = focus if focus else _focus_from_title(composed[0].title)
+    base = focus if focus else _focus_from_title(composed[0].display_title or composed[0].title)
     return f"营养健康行业资讯｜{base}"
 
 
@@ -669,7 +677,7 @@ def _render_markdown(article: _ArticleDocument) -> str:
         lines.append(f"## {index:02d}｜{section_label(section)}")
         lines.append("")
         for item in members:
-            lines.append(f"### {item.title}")
+            lines.append(f"### {item.display_title or item.title}")
             lines.append("")
             lines.append(item.summary)
             lines.append("")
@@ -735,7 +743,7 @@ def _render_html(article: _ArticleDocument) -> str:
             blocks.append(
                 f'<section style="margin:0 0 26px;">'
                 f'<p style="margin:0 0 8px;font-size:17px;font-weight:700;color:{_BRAND_COLORS["title"]};'
-                f'line-height:1.6;">{esc(item.title)}</p>'
+                f'line-height:1.6;">{esc(item.display_title or item.title)}</p>'
                 f'<p style="margin:0 0 10px;font-size:16px;color:{_BRAND_COLORS["body"]};line-height:1.9;">'
                 f"{esc(item.summary)}</p>"
                 + (
