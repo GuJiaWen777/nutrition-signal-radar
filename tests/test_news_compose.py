@@ -608,7 +608,10 @@ def test_key_facts_and_insights_render(tmp_path: Path, monkeypatch) -> None:
             summary="保健食品领域出现新的监管动作，相关主体需要关注后续执行细则与合规要求变化。",
             implication="监管节奏加快，注册与宣传策略需相应调整。",
             keywords=("保健食品", "合规"),
-            key_facts=({"kind": "entity", "value": str(item["title"])[:12], "note": "主体"} ,),
+            key_facts=(
+                {"kind": "entity", "value": str(item["title"])[:12], "note": "主体"},
+                {"kind": "fact", "value": "合规要求", "note": "主题词"},
+            ),
         ),
     )
     monkeypatch.setattr(compose, "_rewrite_title_with_model", lambda gw, title, limit: None)
@@ -627,6 +630,12 @@ def test_key_facts_and_insights_render(tmp_path: Path, monkeypatch) -> None:
     assert "保健食品监管与合规环节" in html_text
     markdown = (build_dir / "news-article.md").read_text(encoding="utf-8")
     assert "## 本期速览" in markdown
-    assert "关键信息：" in markdown
+    # 关键信息单行展示，顿号分隔
+    for line in markdown.splitlines():
+        if line.startswith("关键信息："):
+            assert "、" in line.split("：", 1)[1]
+            break
+    else:
+        raise AssertionError("no key-facts line found")
     manifest = json.loads((build_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["insights"]

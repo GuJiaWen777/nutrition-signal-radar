@@ -673,8 +673,11 @@ def _render_markdown(article: _ArticleDocument) -> str:
             lines.append("")
             lines.append(item.summary)
             lines.append("")
-            for fact in item.key_facts:
-                lines.append(f"关键信息：{fact['value']}（{fact['note']}）")
+            if item.key_facts:
+                lines.append(
+                    "关键信息："
+                    + "、".join(f"{fact['value']}（{fact['note']}）" for fact in item.key_facts)
+                )
             lines.append("")
             lines.append(f"对行业意味着什么：{item.implication}")
             lines.append("")
@@ -735,11 +738,16 @@ def _render_html(article: _ArticleDocument) -> str:
                 f'line-height:1.6;">{esc(item.title)}</p>'
                 f'<p style="margin:0 0 10px;font-size:16px;color:{_BRAND_COLORS["body"]};line-height:1.9;">'
                 f"{esc(item.summary)}</p>"
-                + "".join(
-                    f'<p style="margin:0 0 6px;font-size:14px;color:{_BRAND_COLORS["body"]};'
-                    f'line-height:1.8;">关键信息：<strong>{esc(fact["value"])}</strong>'
-                    f"（{esc(fact['note'])}）</p>"
-                    for fact in item.key_facts[:2]
+                + (
+                    f'<p style="margin:0 0 10px;font-size:14px;color:{_BRAND_COLORS["body"]};'
+                    f'line-height:1.8;">关键信息：'
+                    + "、".join(
+                        f"<strong>{esc(fact['value'])}</strong>（{esc(fact['note'])}）"
+                        for fact in item.key_facts[:2]
+                    )
+                    + "</p>"
+                    if item.key_facts
+                    else ""
                 )
                 + f'<section style="margin:0 0 10px;padding:10px 14px;background:{_BRAND_COLORS["panel"]};'
                 f'border-left:3px solid {_BRAND_COLORS["green"]};">'
