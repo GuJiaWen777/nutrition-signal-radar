@@ -1,3 +1,5 @@
+> **已归档（2026-09-03）**：切片级实施流水账（F-01 至 P4-07 全部完成）。当前运行状态见 `README.md`，资讯线日常操作见 `docs/NEWS_WORKFLOW.md`。本文仅作历史参考，不再更新。
+
 # 营养健康行业信号雷达实施计划
 
 状态：`Implementation Started — P1 Source Registry / Sync / Weekly Signal Brief & Publishable Article Slices Ready; P2 Offline/Online Article-Draft Slices Ready; Phase 3 Operations Slices Confirmed (Not Started); Phase 4 P4-01–P4-07 News-Line Slices Implemented (Live Rehearsal Pending Whitelist Confirmation & WeChat Credentials); Independent Repository Migrated`

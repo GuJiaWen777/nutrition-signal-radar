@@ -1,3 +1,5 @@
+> **已归档（2026-09-03）**：这是旧「行业信号线」的需求基线（2026-08-17 定稿）。现行需求以 `docs/DSA自动化文章需求.docx`（资讯线）与 [ADR-0014](../adr/0014-news-line-and-wechat-draft-publishing.md) 为准；术语见 `CONTEXT.md`。本文仅作历史参考，不再更新。
+
 # 营养健康行业信号雷达（需求基线）
 
 状态：`Requirements Confirmed — Independent Repository Migrated — Weekly Horizontal Brief + Vertical Deep-Research Branches Confirmed`
