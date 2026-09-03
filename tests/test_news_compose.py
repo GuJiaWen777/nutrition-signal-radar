@@ -639,3 +639,128 @@ def test_key_facts_and_insights_render(tmp_path: Path, monkeypatch) -> None:
         raise AssertionError("no key-facts line found")
     manifest = json.loads((build_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["insights"]
+
+
+def _seed_selected_direct(
+    database_path: Path,
+    entries: list[tuple[str, str, str, datetime]],
+) -> None:
+    """直采通道播种入选条目：(source_account, title, url, published_at)。"""
+
+    articles = tuple(
+        NormalizedArticle(
+            external_id=external_id_for_article(
+                url=link,
+                account_name=account,
+                title=title,
+                published_at=published.strftime("%Y-%m-%d %H:%M:%S"),
+                content_hash=None,
+            ),
+            account_name=account,
+            title=title,
+            published_at=published.strftime("%Y-%m-%d %H:%M:%S"),
+            url=link,
+            content_snapshot="保健食品监管动态与行业合规要求说明。",
+            content_hash=None,
+        )
+        for account, title, link, published in entries
+    )
+    import_article_batch(
+        database_path,
+        ArticleBatch(
+            source_kind="news",
+            source_path="direct",
+            source_fingerprint=f"direct-{articles[0].published_at}",
+            source_rows=len(articles),
+            articles=articles,
+            account_segment="news_source",
+        ),
+    )
+    evaluate_pending_news_articles(database_path)
+
+
+def _article_item_titles(database_path: Path, slug: str, version: int) -> list[str]:
+    import sqlite3
+
+    connection = sqlite3.connect(database_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT ni.title FROM news_article_items nai
+            JOIN news_articles na ON na.id = nai.article_id
+            JOIN news_items ni ON ni.id = nai.news_item_id
+            WHERE na.slug = ? AND na.version = ?
+            ORDER BY nai.news_item_id
+            """,
+            (slug, version),
+        ).fetchall()
+        return [row[0] for row in rows]
+    finally:
+        connection.close()
+
+
+def test_build_excludes_items_consumed_by_previous_issues(tmp_path: Path) -> None:
+    """跨期排除：上期已用条目不再进下期；同 slug 重build豁免。"""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _enable_test_sources(database_path)
+    exports_dir = tmp_path / "var" / "exports" / "news-articles"
+    gateway = FakeComposeGateway(lambda _prompt: _valid_payload())
+    gov, brand, expo = "测试监管网", "测试品牌源", "测试展会源"
+
+    # 第 1 期（周一）：3 条不同信源 → daily 成文并消耗。
+    _seed_selected_direct(
+        database_path,
+        [
+            (gov, "市场监管总局就保健食品原料目录公开征求意见", "https://www.example.gov.cn/d/1", NOW - timedelta(hours=2)),
+            (brand, "汤臣倍健发布半年度财报业绩稳健增长", "https://www.example-brand.com/d/1", NOW - timedelta(hours=3)),
+            (expo, "NHNE健康营养博览会今日开幕", "https://www.example-expo.com/d/1", NOW - timedelta(hours=4)),
+        ],
+    )
+    first = build_news_article(database_path, gateway, exports_dir=exports_dir, now=NOW)
+    assert first.status == "built" and first.mode == "daily"
+    day1_titles = _article_item_titles(database_path, first.slug, first.version)
+    assert len(day1_titles) == 3
+
+    # 第 2 期（周二）：只来 1 条新条目。若无跨期排除，7 日池仍有 4 条会
+    # 重发旧闻；正确行为是候选池只剩 1 条 → 不足 2 条跳过。
+    next_day = NOW + timedelta(days=1)
+    _seed_selected_direct(
+        database_path,
+        [(gov, "监管部门通报保健食品虚假宣传典型案例处罚结果", "https://www.example.gov.cn/d/2", next_day - timedelta(hours=2))],
+    )
+    second = build_news_article(database_path, gateway, exports_dir=exports_dir, now=next_day)
+    assert second.status == "skipped"
+    assert second.slug != first.slug
+
+    # 第 3 期（周三）：再来 2 条 → 加上周二未消耗的 1 条凑满 3 条 daily，
+    # 且与第 1 期零重叠。
+    third_day = NOW + timedelta(days=2)
+    _seed_selected_direct(
+        database_path,
+        [
+            (gov, "三部门联合开展保健食品行业清理整顿专项行动", "https://www.example.gov.cn/d/3", third_day - timedelta(hours=2)),
+            (brand, "汤臣倍健发布第三季度财报业绩稳健增长", "https://www.example-brand.com/d/3", third_day - timedelta(hours=3)),
+        ],
+    )
+    third = build_news_article(database_path, gateway, exports_dir=exports_dir, now=third_day)
+    assert third.status == "built" and third.mode == "daily"
+    day3_titles = _article_item_titles(database_path, third.slug, third.version)
+    assert len(day3_titles) == 3
+    assert not (set(day1_titles) & set(day3_titles))
+
+    # 关联表完整记录了每一期消耗的条目。
+    import sqlite3
+
+    connection = sqlite3.connect(database_path)
+    try:
+        total_links = connection.execute("SELECT COUNT(*) FROM news_article_items").fetchone()[0]
+    finally:
+        connection.close()
+    assert total_links == 6
+
+    # 同 slug 当天重build（如修复后重出 v002）豁免排除：候选池不变。
+    rebuild = build_news_article(database_path, gateway, exports_dir=exports_dir, now=third_day)
+    assert rebuild.status == "built"
+    assert rebuild.slug == third.slug and rebuild.version == 2
+    assert len(_article_item_titles(database_path, rebuild.slug, rebuild.version)) == 3

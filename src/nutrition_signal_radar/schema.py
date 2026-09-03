@@ -867,6 +867,26 @@ NEWS_SOURCE_PARSER_CONFIG_SCHEMA = Migration(
 )
 
 
+NEWS_ARTICLE_ITEMS_SCHEMA = Migration(
+    version=17,
+    name="news_article_item_links",
+    statements=(
+        f"""
+        CREATE TABLE news_article_items (
+            article_id INTEGER NOT NULL REFERENCES news_articles(id),
+            news_item_id INTEGER NOT NULL REFERENCES news_items(id),
+            created_at TEXT NOT NULL DEFAULT ({UTC_NOW}),
+            PRIMARY KEY (article_id, news_item_id)
+        )
+        """,
+        """
+        CREATE INDEX ix_news_article_items_item
+        ON news_article_items(news_item_id)
+        """,
+    ),
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     INITIAL_SCHEMA,
     DEMO_CLUSTERING_SCHEMA,
@@ -884,6 +904,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     NEWS_ARTICLE_SCHEMA,
     NEWS_WECHAT_PUSH_SCHEMA,
     NEWS_SOURCE_PARSER_CONFIG_SCHEMA,
+    NEWS_ARTICLE_ITEMS_SCHEMA,
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
 

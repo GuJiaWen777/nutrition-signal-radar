@@ -117,6 +117,8 @@ class ComposedItem:
     keywords: tuple[str, ...]
     display_title: str = ""
     key_facts: tuple[dict[str, str], ...] = ()
+    # news_items.id：跨期排除的关联键（article_id 是 source_articles.id，两者不同）。
+    news_item_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -163,20 +165,26 @@ def build_news_article(
         raise NewsComposeError("max_items must be between 1 and 10")
     current_time = _ensure_cst(now) if now is not None else datetime.now(_CST)
 
+    # Slug 先于候选池确定：加载层要排除「已被其他期文章消耗」的条目，
+    # 同 slug 重build（当天修复后重出 v2+）豁免，保证重试看到同一候选池。
+    daily_slug = _daily_slug_for(current_time)
+    weekly_slug = _weekly_slug_for(current_time)
     daily_items, daily_dupes = _dedupe_items(
-        _load_selected_items(database_path, current_time - timedelta(hours=lookback_hours))
+        _load_selected_items(
+            database_path,
+            current_time - timedelta(hours=lookback_hours),
+            as_of=current_time,
+        )
     )
     weekly_items, weekly_dupes = _dedupe_items(
         _load_selected_items(
-            database_path, current_time - timedelta(days=_WEEKLY_LOOKBACK_DAYS)
+            database_path,
+            current_time - timedelta(days=_WEEKLY_LOOKBACK_DAYS),
+            as_of=current_time,
         )
     )
     mode, items = _choose_item_pool(daily_items, weekly_items, max_items)
-    slug = (
-        f"news-{current_time:%Y-%m-%d}"
-        if mode == "daily"
-        else f"news-weekly-{(current_time - timedelta(days=6)):%Y%m%d}"
-    )
+    slug = daily_slug if mode == "daily" else weekly_slug
     if mode == "skip" or len(items) < _MIN_ITEMS_TO_BUILD:
         return NewsBuildResult(
             status="skipped",
@@ -209,7 +217,7 @@ def build_news_article(
         )
     if mode == "daily" and len(composed) < _MIN_ITEMS_FOR_DAILY:
         mode = "weekly"
-        slug = f"news-weekly-{(current_time - timedelta(days=6)):%Y%m%d}"
+        slug = weekly_slug
 
     insights = _compose_insights(gateway, composed)
     title = _build_title(mode, composed)
@@ -259,26 +267,53 @@ def build_news_article(
 # Candidate loading
 
 
+def _daily_slug_for(moment: datetime) -> str:
+    return f"news-{moment:%Y-%m-%d}"
+
+
+def _weekly_slug_for(moment: datetime) -> str:
+    return f"news-weekly-{(moment - timedelta(days=6)):%Y%m%d}"
+
+
 def _load_selected_items(
-    database_path: Path, since: datetime
+    database_path: Path,
+    since: datetime,
+    *,
+    as_of: datetime,
 ) -> list[dict[str, object]]:
+    """Load selected items in the window, minus items consumed by past issues.
+
+    跨期排除：已被「as_of 当天零点之前」成文的文章消耗过的条目不再入选，
+    因此每一期只写新料、多期链式不重复。当天创建的文章不排除——同日重建
+    （修复后重出 v2+）必须看到与上一版相同的候选池，无论上一版用了哪个池
+    （daily 直选或 weekly 补位）。
+    """
+
+    day_start_utc = as_of.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).astimezone(timezone.utc)
+    cutoff = day_start_utc.strftime("%Y-%m-%dT%H:%M:%S")
     initialize_schema(database_path)
     connection = connect_database(database_path, readonly=True)
     try:
         rows = connection.execute(
             """
-            SELECT ni.article_id, ni.title, ni.url, ni.published_at,
-                   ni.source_name, ni.section, ni.priority,
+            SELECT ni.id AS news_item_id, ni.article_id, ni.title, ni.url,
+                   ni.published_at, ni.source_name, ni.section, ni.priority,
                    sa.content_snapshot, sa.fetched_at
             FROM news_items ni
             JOIN source_articles sa ON sa.id = ni.article_id
             WHERE ni.selected = 1 AND ni.published_at IS NOT NULL
               AND ni.published_at >= ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM news_article_items nai
+                  WHERE nai.news_item_id = ni.id AND nai.created_at < ?
+              )
             ORDER BY CASE ni.priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1
                      WHEN 'P2' THEN 2 ELSE 3 END,
                  ni.published_at DESC, ni.id
             """,
-            (since.strftime("%Y-%m-%d %H:%M:%S"),),
+            (since.strftime("%Y-%m-%d %H:%M:%S"), cutoff),
         ).fetchall()
         return [dict(row) for row in rows]
     finally:
@@ -451,6 +486,7 @@ def _summarize(
             implication=implication,
             keywords=keywords,
             key_facts=verified_facts,
+            news_item_id=int(item.get("news_item_id") or 0),
         )
     return None
 
@@ -955,6 +991,26 @@ def _write_build(
                     file_count,
                 ),
             )
+            article_row_id = int(
+                connection.execute(
+                    "SELECT id FROM news_articles WHERE slug = ? AND version = ?", (slug, version)
+                ).fetchone()["id"]
+            )
+            # created_at 显式取构建时刻（而非 DB 时钟）：跨期排除按它与
+            # 构建日零点比较，测试的虚构时间线也必须成立。
+            consumed_at = generated_at.astimezone(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
+            for item in composed:
+                if item.news_item_id <= 0:
+                    continue
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO news_article_items(article_id, news_item_id, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (article_row_id, item.news_item_id, consumed_at),
+                )
     finally:
         connection.close()
     return NewsBuildResult(

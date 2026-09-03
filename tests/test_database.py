@@ -46,7 +46,7 @@ def test_empty_database_initializes_all_phase_one_tables(tmp_path: Path) -> None
 
     assert result.starting_version == 0
     assert result.ending_version == LATEST_SCHEMA_VERSION
-    assert result.applied_versions == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+    assert result.applied_versions == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
     connection = connect_database(path, readonly=True)
     try:
         tables = {
@@ -69,13 +69,13 @@ def test_repeated_initialization_is_idempotent(tmp_path: Path) -> None:
     first = initialize_schema(path)
     second = initialize_schema(path)
 
-    assert first.applied_versions == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+    assert first.applied_versions == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
     assert second.starting_version == LATEST_SCHEMA_VERSION
     assert second.ending_version == LATEST_SCHEMA_VERSION
     assert second.applied_versions == ()
     connection = connect_database(path, readonly=True)
     try:
-        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 16
+        assert connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 17
     finally:
         connection.close()
 
@@ -204,7 +204,7 @@ def test_v4_data_is_backfilled_into_one_open_monitoring_cycle(tmp_path: Path) ->
     result = initialize_schema(path)
 
     assert result.starting_version == 4
-    assert result.applied_versions == (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+    assert result.applied_versions == (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17)
     connection = connect_database(path, readonly=True)
     try:
         cycle = connection.execute("SELECT * FROM monitoring_cycles").fetchone()

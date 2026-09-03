@@ -10,8 +10,8 @@ def test_database_cli_initializes_and_reports_status(tmp_path: Path, capsys) -> 
 
     assert result == 0
     assert init_payload["starting_version"] == 0
-    assert init_payload["ending_version"] == 16
-    assert init_payload["applied_versions"] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    assert init_payload["ending_version"] == 17
+    assert init_payload["applied_versions"] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     assert (tmp_path / "var" / "radar.sqlite3").is_file()
 
     result = main(["--project-root", str(tmp_path), "db", "status", "--json"])
@@ -19,5 +19,5 @@ def test_database_cli_initializes_and_reports_status(tmp_path: Path, capsys) -> 
 
     assert result == 0
     assert status_payload["state"] == "up_to_date"
-    assert status_payload["current_version"] == 16
-    assert status_payload["latest_version"] == 16
+    assert status_payload["current_version"] == 17
+    assert status_payload["latest_version"] == 17

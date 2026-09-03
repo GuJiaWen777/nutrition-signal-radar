@@ -189,7 +189,7 @@ def test_news_whitelist_schema_upgrades_from_v11_without_losing_state(tmp_path: 
 
     assert seeded.inserted == news_source_seed_count()
     assert status.state == "up_to_date"
-    assert status.current_version == 16
+    assert status.current_version == 17
     assert len(list_news_sources(database_path)) == news_source_seed_count()
 
 
