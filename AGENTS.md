@@ -19,11 +19,15 @@
 
 资讯线需求原文：`docs/DSA自动化文章需求.docx`。边界见 [ADR-0014](docs/adr/0014-news-line-and-wechat-draft-publishing.md)。
 
+**运营节奏分级（2026-09-03 确认）**：每周固定运转的只有资讯自动线（周一/周四成文）。行业信号线按需运转——想从行业媒体热点找深度选题时才跑一轮（sync → 快报 → 选题/研究）；可发布周报文章降为可选（深度研究可替代其大部分价值），不再是每周义务。信号线基础设施保持可用，闲置零成本；两者输入不同（公众号监测 vs 官方直采），产物不重复。
+
 ## 动手前必读
 
-实施类任务先读：`README.md`、`DESIGN_DRAFT.md`、`CONTEXT.md`、`IMPLEMENTATION_PLAN.md`。
+实施类任务先读：`README.md`（现状与命令）、`CONTEXT.md`（术语）。
 
 改资讯线再加：`docs/DSA自动化文章需求.docx`、`docs/adr/0014-news-line-and-wechat-draft-publishing.md`、`docs/NEWS_WORKFLOW.md`。
+
+现行需求以资讯线 docx 与 ADR-0014 为准。旧「行业信号线」需求基线与切片流水账已归档到 `docs/archive/`（DESIGN_DRAFT / IMPLEMENTATION_PLAN / SOURCE_REGISTRY_DRAFT），仅作历史参考，不再更新。
 
 术语以 `CONTEXT.md` 为准。不要把公众号监测叫「舆情分析」，不要把资讯线当行业信号输入，不要把「本周信号快报」和「可发布周报文章」当成同一产物。
 
@@ -33,13 +37,13 @@
 - 本仓库独立于历史 `SentimentTracker` / Weekly Publisher。不要编辑它、写入它或复用其运行状态。只读参考其微信公众号集成为 2026-08-31 明确批准；超出只读仍需新决策。
 - `docs/DSA自动化文章需求.docx` 的微信接入已批准：生成的资讯文章可以进入草稿箱，并按接口权限定时发布。**群发（mass-send）路径始终禁止。** 周报、深度研究等既有产物仍由人工复制发布。
 - 不要把凭据写入代码、SQLite、日志、夹具、文档或版本库。凭据只走本仓库 `.env`。
-- 把 DeepSeek 当作可配置的 OpenAI 兼容分析后端，不要当成已经具备公网检索。Phase 2 仍要求 Agent 源检索烟雾测试。
+- 把 DeepSeek 当作可配置的 OpenAI 兼容分析后端，不要当成已经具备公网检索；联网检索只走显式授权的 Agent 路径。
 - 测试默认 mock RedFox 和 Agent。真实外呼只通过显式 `--live`（以及发布时的 `--confirm`），且凭据已配置。
 - 保留人工门禁。AI 分数可以排序和解释，但不得自动归档、批准或启动未确认的研究。唯一自动发布路径是上面批准的微信草稿箱/定时发布；**白名单首次确认仍必须人工决定。**
 - 资讯线：LLM 不参与采集与筛选；筛选、P0–P3 与拦截用确定性规则。模型只根据已抓取原文摘要，不得补充未出现的事实、数据或金额。
 - 资讯线不使用 EarlyData 电商数据，不抓取无法核验的自媒体/营销软文，不把庶正康讯等竞对公众号当聚合源（对标对象，不是搬运对象）。
 - 把 `var/` 当本地运行状态，保持不入库。
-- 按 `IMPLEMENTATION_PLAN.md` 的顺序实施；0.1 退出标准未满足前不要开始 Phase 2。
+- 切片顺序见 `docs/archive/IMPLEMENTATION_PLAN.md`（历史记录）；新切片先在对话中确认范围再动手。
 - 任何未来的共享模块抽取、跨项目状态复用或仓库外文件编辑，都需要一次新的明确决策。
 
 ## 资讯成文：条数目标与当前缺口
@@ -103,17 +107,17 @@ uv sync --extra dev
 .\.venv\Scripts\nutrition-radar.exe news publish --live --confirm --slug news-YYYY-MM-DD --version 1
 ```
 
-每日无人值守只跑 `fetch → select → build`（见 `scripts/news_daily.ps1`）。`publish` 永远是人工显式动作。
+每日无人值守跑 `fetch → select`，build 只在周一、周四触发（一周两期成文节奏，依据实测供给确定；见 `scripts/news_daily.ps1`）。跨期不重复由成文层的 `news_article_items` 排除保证（排除构建日零点前已成文条目，同日重建豁免）。`publish` 永远是人工显式动作。
 
 ## 深入文档
 
 | 问题 | 去哪看 |
 | --- | --- |
-| 产品需求与对象定义 | `DESIGN_DRAFT.md`、`CONTEXT.md` |
-| 切片状态与不做清单 | `IMPLEMENTATION_PLAN.md` |
-| 怎么跑、当前命令 | `README.md` |
+| 怎么跑、当前命令、文档地图 | `README.md` |
 | 资讯线需求原文 | `docs/DSA自动化文章需求.docx` |
 | 资讯线边界与微信草稿箱 | `docs/adr/0014-news-line-and-wechat-draft-publishing.md` |
 | 资讯线日常操作与信源实调 | `docs/NEWS_WORKFLOW.md` |
 | 周报人工节奏 | `docs/WEEKLY_WORKFLOW.md` |
 | 可发布周报文章契约 | `docs/adr/0013-publishable-weekly-article.md` |
+| 术语与对象定义 | `CONTEXT.md` |
+| 旧需求基线 / 切片流水账（已归档） | `docs/archive/` |
