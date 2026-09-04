@@ -1066,7 +1066,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         lookback_hours=args.lookback_hours,
                         max_items=args.max_items,
                         logo_path=logo_path if logo_path.is_file() else None,
-                        fetch_lead_images=True,
+                        # 原文配图默认关闭（2026-09-04）：展会列表页的 og:image
+                        # 是页面级横幅，与单条内容不匹配，配了不如不配。提取链路
+                        # 与测试保留，待按「正文内嵌图+内容相关性」规则实调后再开。
                     )
                 except (NewsComposeError, LlmGatewayError, NewsRegistryError, OSError, ValueError) as exc:
                     print(f"News build failed: {exc}", file=sys.stderr)
