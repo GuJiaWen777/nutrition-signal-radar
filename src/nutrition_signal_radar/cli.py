@@ -80,7 +80,7 @@ from .weekly_service import (
     reopen_weekly_article,
 )
 from .wechat_article_import import import_wechat_article
-from .web_app import run_demo_server, run_radar_server
+from .web_app import run_demo_server, run_news_reader_server, run_radar_server
 from .xlsx_gateway import XlsxImportError, load_xlsx_batch
 
 
@@ -450,6 +450,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     news_publish.add_argument("--author", default="EarlyData", help="Draft author display name (default: EarlyData).")
     news_publish.add_argument("--digest", help="Optional draft digest; defaults to the article lead paragraph.")
     news_publish.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    news_serve = news_commands.add_parser(
+        "serve",
+        help="Serve built news articles as a local read-only reading site (127.0.0.1 only).",
+    )
+    news_serve.add_argument("--port", type=int, default=8780, help="Local port (default: 8780).")
+    news_serve.add_argument(
+        "--open", action="store_true", help="Open the reading site in the default browser."
+    )
 
     sync = commands.add_parser(
         "sync",
@@ -1058,6 +1066,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         lookback_hours=args.lookback_hours,
                         max_items=args.max_items,
                         logo_path=logo_path if logo_path.is_file() else None,
+                        fetch_lead_images=True,
                     )
                 except (NewsComposeError, LlmGatewayError, NewsRegistryError, OSError, ValueError) as exc:
                     print(f"News build failed: {exc}", file=sys.stderr)
@@ -1074,6 +1083,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                         for file_name in result.files:
                             print(f"  - {file_name}")
+                return 0
+
+            if args.news_command == "serve":
+                run_news_reader_server(
+                    settings.database_path, port=args.port, open_browser=args.open
+                )
                 return 0
 
             if args.news_command == "publish":

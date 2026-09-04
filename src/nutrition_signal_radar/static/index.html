@@ -42,6 +42,8 @@
 
   <nav class="tabs" aria-label="工作台导航">
     <button class="tab is-active" data-tab="overview">总览</button>
+    <button class="tab" data-tab="news">资讯线</button>
+    <button class="tab" data-tab="news-sources">资讯信源</button>
     <button class="tab" data-tab="signals">行业信号</button>
     <button class="tab" data-tab="weekly">本周快报</button>
     <button class="tab" data-tab="board">选题看板</button>
@@ -50,6 +52,64 @@
   </nav>
 
   <main>
+    <section class="panel" id="news-sources">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">NEWS SOURCES</span>
+          <h2>资讯信源</h2>
+        </div>
+        <p>资讯线白名单的健康视图。启用变更走 CLI：<code>news set-source-enabled --name "XX" --enable</code>；首次启用必须人工确认，看板只读。</p>
+      </div>
+      <div class="surface table-wrap">
+        <div class="surface-title"><span>信源健康</span><span class="muted" id="newsSourceSummary"></span></div>
+        <table>
+          <thead><tr><th>信源</th><th>类目</th><th>优先级</th><th>启用</th><th>健康</th><th>最后入库</th></tr></thead>
+          <tbody id="newsSourceRows"></tbody>
+        </table>
+        <p class="table-note">sync_health=error 表示最近一轮抓取失败（留审计事件，不影响其他源）；「从未」表示启用后还没有抓到过条目。</p>
+      </div>
+    </section>
+
+    <section class="panel" id="news">
+      <div class="section-heading">
+        <div>
+          <span class="eyebrow">NEWS PIPELINE</span>
+          <h2>资讯自动线</h2>
+        </div>
+        <p>白名单直采 → 规则筛选 → 周一/周四成文；看板只读。启用、成文、推送草稿箱全部保留在 CLI 的人工门禁之后，群发路径不存在。</p>
+      </div>
+      <div class="surface table-wrap">
+        <div class="surface-title"><span>近 7 天条目</span><span class="muted" id="newsItemSummary"></span></div>
+        <table>
+          <thead><tr><th>日期</th><th>优先级</th><th>信源</th><th>标题</th><th>状态</th></tr></thead>
+          <tbody id="newsItemRows"></tbody>
+        </table>
+        <p class="table-note">落选理由码用于词表实调：<code>not_relevant</code> / <code>no_action_info</code> / <code>missing_body</code> 等，先看数据再改词表，不让 LLM 参与筛选。</p>
+      </div>
+      <div class="surface table-wrap">
+        <div class="surface-title"><span>成稿（最近 12 期）</span><span class="muted">点击「预览」在下方查看排版成品</span></div>
+        <table>
+          <thead><tr><th>期次</th><th>版本</th><th>模式</th><th>条数</th><th>质检</th><th>草稿箱</th><th>生成时间</th><th></th></tr></thead>
+          <tbody id="newsArticleRows"></tbody>
+        </table>
+        <p class="table-note" id="newsArticleNote">发布走 CLI：<code>news publish --live --confirm --slug &lt;slug&gt; --version &lt;N&gt;</code>（每稿限推一次）。看板不提供推送按钮。</p>
+      </div>
+      <div class="surface" id="newsPreviewWrap" hidden>
+        <div class="surface-title"><span>成稿预览</span><span class="muted" id="newsPreviewTitle"></span></div>
+        <iframe id="newsPreviewFrame" title="资讯成稿预览" class="news-preview-frame"></iframe>
+      </div>
+      <article class="surface process-card">
+        <div class="surface-title"><span>发布前复核清单</span><span class="muted">每次 publish --confirm 之前过一遍（约 3 分钟）</span></div>
+        <ol class="process-list">
+          <li><span>01</span><div><strong>摘要忠实原文</strong><small>「征求意见稿」没有被说成「已实施」；日期与主体无误</small></div></li>
+          <li><span>02</span><div><strong>条目确实相关</strong><small>擦边弱相关条目剔除——关键词规则拦不住语义层</small></div></li>
+          <li><span>03</span><div><strong>去重无误伤漏杀</strong><small>同一事件没有被拆成两条，不同事件没被误合并</small></div></li>
+          <li><span>04</span><div><strong>标题与本期速览</strong><small>钩子恰当，跨条目综合不牵强</small></div></li>
+          <li><span>05</span><div><strong>抽查一条原文链接</strong><small>能打开且是同一件事</small></div></li>
+        </ol>
+      </article>
+    </section>
+
     <section class="panel is-active" id="overview">
       <div class="section-heading">
         <div>

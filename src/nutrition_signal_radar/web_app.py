@@ -23,6 +23,7 @@ from .cycle_service import (
 )
 from .database import connect_database
 from .demo_pipeline import DEMO_GENERATOR
+from .news_registry import list_news_sources
 from .redfox_gateway import RedFoxGateway, RedFoxGatewayError
 from .research_workflow import (
     OnlineResearchRunner,
@@ -232,6 +233,21 @@ def _handler_for(
                         workspace_kind=self.workspace_kind,
                     )
                 )
+                return
+            if path == "/api/news":
+                self._send_json(_news_payload(database_path))
+                return
+            news_preview_match = re.fullmatch(r"/api/news/articles/(\d+)/preview", path)
+            if news_preview_match:
+                html_text = _news_article_preview(database_path, int(news_preview_match.group(1)))
+                if html_text is None:
+                    self._send_json(
+                        {"error": "news article preview not found"}, HTTPStatus.NOT_FOUND
+                    )
+                else:
+                    self._send_bytes(
+                        html_text.encode("utf-8"), "text/html; charset=utf-8"
+                    )
                 return
             if path == "/api/research-tasks":
                 cycle_slug = parse_qs(parsed.query).get("cycle", [None])[0]
@@ -1006,6 +1022,265 @@ def _handler_for(
             print(f"[demo] {self.address_string()} - {format % args}")
 
     return DemoHandler
+
+
+def _news_payload(database_path: Path, *, item_days: int = 7) -> dict[str, Any]:
+    """Read-only snapshot for the news-line tab: sources, items, articles.
+
+    资讯线在看板中只读：不提供启用、成文或推送入口——那些动作保留在
+    CLI 的人工门禁之后（ADR-0014）。
+    """
+
+    connection = connect_database(database_path, readonly=True)
+    try:
+        sources = []
+        for source in sorted(
+            list_news_sources(database_path),
+            key=lambda s: (not s.enabled, s.default_priority, s.name),
+        ):
+            sources.append(
+                {
+                    "name": source.name,
+                    "category": source.category,
+                    "priority": source.default_priority,
+                    "fetch_kind": source.fetch_kind,
+                    "enabled": bool(source.enabled),
+                    "sync_health": source.sync_health,
+                    "last_fetched_at": source.last_fetched_at,
+                    "last_item_at": source.last_item_at,
+                    "entry_url": source.entry_url,
+                }
+            )
+
+        since = f"datetime('now', '-{max(1, item_days)} days')"
+        item_rows = connection.execute(
+            f"""
+            SELECT id, title, source_name, published_at, priority, selected,
+                   rejection_reasons
+            FROM news_items
+            WHERE published_at IS NOT NULL AND published_at >= {since}
+            ORDER BY selected DESC,
+                     CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1
+                      WHEN 'P2' THEN 2 ELSE 3 END,
+                 published_at DESC
+            LIMIT 60
+            """
+        ).fetchall()
+        items = []
+        for row in item_rows:
+            try:
+                reasons = json.loads(str(row["rejection_reasons"] or "[]"))
+            except json.JSONDecodeError:
+                reasons = []
+            codes: list[str] = []
+            for reason in reasons:
+                if isinstance(reason, dict):
+                    code = str(reason.get("code") or reason.get("reason") or "").strip()
+                else:
+                    code = str(reason).strip()
+                if code:
+                    codes.append(code)
+            items.append(
+                {
+                    "title": str(row["title"]),
+                    "source_name": str(row["source_name"]),
+                    "published_at": str(row["published_at"] or ""),
+                    "priority": str(row["priority"] or ""),
+                    "selected": bool(row["selected"]),
+                    "rejection_reasons": codes,
+                }
+            )
+
+        article_rows = connection.execute(
+            """
+            SELECT id, slug, version, mode, title, item_count, created_at,
+                   relative_path, wechat_media_id, wechat_pushed_at
+            FROM news_articles
+            ORDER BY created_at DESC, id DESC
+            LIMIT 12
+            """
+        ).fetchall()
+        articles = []
+        for row in article_rows:
+            build_dir = Path(str(row["relative_path"]))
+            qc_summary = None
+            qc_path = build_dir / "qc-log.json"
+            if qc_path.is_file():
+                try:
+                    qc = json.loads(qc_path.read_text(encoding="utf-8"))
+                    failed = [
+                        str(check.get("check"))
+                        for check in (qc.get("article_checks") or [])
+                        if check.get("passed") is False
+                    ]
+                    bad_items = sum(
+                        1
+                        for check in (qc.get("item_checks") or [])
+                        if not check.get("summary_length_ok", True)
+                        or not check.get("fields_complete", True)
+                    )
+                    qc_summary = {
+                        "all_passed": bool(qc.get("all_passed")),
+                        "failed": failed,
+                        "bad_items": bad_items,
+                    }
+                except (json.JSONDecodeError, OSError):
+                    qc_summary = None
+            articles.append(
+                {
+                    "id": int(row["id"]),
+                    "slug": str(row["slug"]),
+                    "version": int(row["version"]),
+                    "mode": str(row["mode"]),
+                    "title": str(row["title"]),
+                    "item_count": int(row["item_count"]),
+                    "created_at": str(row["created_at"] or ""),
+                    "preview_ready": (build_dir / "news-article.html").is_file(),
+                    "pushed": bool(row["wechat_media_id"]),
+                    "pushed_at": str(row["wechat_pushed_at"] or "") or None,
+                    "qc": qc_summary,
+                }
+            )
+    finally:
+        connection.close()
+
+    return {
+        "sources": sources,
+        "enabled_count": sum(1 for s in sources if s["enabled"]),
+        "items": items,
+        "selected_count": sum(1 for i in items if i["selected"]),
+        "articles": articles,
+        "item_days": item_days,
+    }
+
+
+def _news_article_preview(database_path: Path, article_id: int) -> str | None:
+    """Return the built article's self-contained HTML for iframe preview."""
+
+    connection = connect_database(database_path, readonly=True)
+    try:
+        row = connection.execute(
+            "SELECT relative_path FROM news_articles WHERE id = ?", (article_id,)
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None:
+        return None
+    html_path = Path(str(row["relative_path"])) / "news-article.html"
+    if not html_path.is_file():
+        return None
+    return html_path.read_text(encoding="utf-8")
+
+
+def _escape_html(value: str) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _news_reader_index(database_path: Path) -> str:
+    """Reading-site index: every built article, newest first, plain links."""
+
+    connection = connect_database(database_path, readonly=True)
+    try:
+        rows = connection.execute(
+            """
+            SELECT id, slug, version, mode, title, item_count, created_at
+            FROM news_articles ORDER BY created_at DESC, id DESC
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+    items_html = "".join(
+        f'<li><a href="/a/{int(row["id"])}">{_escape_html(str(row["title"]))}</a>'
+        f'<small>{_escape_html(str(row["slug"]))} · v{int(row["version"]):03d} · '
+        f'{"日报" if row["mode"] == "daily" else "周报形态"} · {int(row["item_count"])} 条 · '
+        f'{_escape_html(str(row["created_at"])[:10])}</small></li>'
+        for row in rows
+    )
+    return (
+        '<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">'
+        "<title>EarlyData · 营养健康行业资讯</title>"
+        "<style>body{max-width:680px;margin:0 auto;padding:36px 18px;background:#FFFFFF;"
+        "font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif;color:#2B3545;}"
+        "p.kicker{letter-spacing:.1em;color:#2F6CAE;font-size:13px;margin:0 0 6px;}"
+        "h1{font-size:24px;color:#173B66;margin:0 0 20px;}"
+        "ul{list-style:none;padding:0;}li{padding:14px 0;border-bottom:1px solid #E8EEF4;}"
+        "li a{font-size:17px;font-weight:700;color:#173B66;text-decoration:none;}"
+        "li a:hover{color:#2F6CAE;}li small{display:block;margin-top:4px;color:#718096;font-size:12px;}"
+        "</style></head><body>"
+        '<p class="kicker">EARLYDATA · 营养健康行业资讯</p>'
+        "<h1>往期成稿</h1>"
+        + (
+            "<ul>" + items_html + "</ul>"
+            if items_html
+            else "<p>还没有成稿；运行 <code>news build --live</code> 生成。</p>"
+        )
+        + "</body></html>"
+    )
+
+
+def create_news_reader_server(database_path: Path, *, port: int = 0) -> ThreadingHTTPServer:
+    """Standalone read-only reading site for built news articles (localhost only)."""
+
+    database = database_path.resolve()
+    if not database.is_file():
+        raise FileNotFoundError(f"Radar database does not exist: {database}")
+    initialize_schema(database)
+
+    class NewsReaderHandler(BaseHTTPRequestHandler):
+        server_version = "NutritionNewsReader/0.1"
+
+        def do_GET(self) -> None:  # noqa: N802
+            path = urlparse(self.path).path
+            if path == "/":
+                self._send_html(_news_reader_index(database).encode("utf-8"))
+                return
+            match = re.fullmatch(r"/a/(\d+)", path)
+            if match:
+                html_text = _news_article_preview(database, int(match.group(1)))
+                if html_text is None:
+                    self._send_html(b"<h1>404</h1>", HTTPStatus.NOT_FOUND)
+                else:
+                    self._send_html(html_text.encode("utf-8"))
+                return
+            self._send_html(b"<h1>404</h1>", HTTPStatus.NOT_FOUND)
+
+        def _send_html(self, body: bytes, status: HTTPStatus = HTTPStatus.OK) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            pass
+
+    return ThreadingHTTPServer(("127.0.0.1", port), NewsReaderHandler)
+
+
+def run_news_reader_server(
+    database_path: Path,
+    *,
+    port: int = 8780,
+    open_browser: bool = False,
+) -> None:
+    server = create_news_reader_server(database_path, port=port)
+    url = f"http://127.0.0.1:{server.server_port}/"
+    print(f"News reader: {url}")
+    print("Press Ctrl+C to stop. The server only listens on 127.0.0.1.")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
 
 
 def _dashboard_payload(

@@ -70,6 +70,8 @@ const RESEARCH_DISPLAY_STAGES = [
 
 const state = {
   data: null,
+  news: null,
+  newsLoaded: false,
   activeCycleSlug: null,
   weeklyBrief: null,
   weeklyArticle: null,
@@ -174,7 +176,96 @@ function switchTab(tabId) {
   document.querySelectorAll(".panel").forEach((panel) => {
     panel.classList.toggle("is-active", panel.id === tabId);
   });
+  if ((tabId === "news" || tabId === "news-sources") && !state.newsLoaded) loadNews();
   window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function loadNews() {
+  try {
+    const response = await fetch("/api/news");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    state.news = await response.json();
+    state.newsLoaded = true;
+    renderNewsSources();
+    renderNewsItems();
+    renderNewsArticles();
+  } catch (error) {
+    showToast(`无法读取资讯线：${error.message}`, true);
+  }
+}
+
+const NEWS_CATEGORY = { policy: "政策", disclosure: "披露", brand: "品牌", expo: "展会", research: "科研" };
+
+function renderNewsSources() {
+  const sources = state.news.sources || [];
+  document.querySelector("#newsSourceSummary").textContent = `白名单 ${sources.length} 个 / 已启用 ${state.news.enabled_count}`;
+  document.querySelector("#newsSourceRows").innerHTML = sources.length
+    ? sources.map((source) => `
+      <tr>
+        <td><strong>${escapeHtml(source.name)}</strong></td>
+        <td>${escapeHtml(NEWS_CATEGORY[source.category] || source.category)}</td>
+        <td>${escapeHtml(source.priority)}</td>
+        <td><span class="badge ${source.enabled ? "teal" : ""}">${source.enabled ? "已启用" : "停用"}</span></td>
+        <td>${escapeHtml(source.sync_health || "—")}</td>
+        <td>${source.last_item_at ? formatDate(source.last_item_at) : '<span class="muted">从未</span>'}</td>
+      </tr>
+    `).join("")
+    : '<tr><td colspan="6" class="empty-cell">尚未导入白名单；CLI 运行 news seed-sources。</td></tr>';
+}
+
+function renderNewsItems() {
+  const items = state.news.items || [];
+  document.querySelector("#newsItemSummary").textContent = `近 ${state.news.item_days} 天：入选 ${state.news.selected_count} / 落选 ${items.length - state.news.selected_count}`;
+  document.querySelector("#newsItemRows").innerHTML = items.length
+    ? items.map((item) => `
+      <tr>
+        <td>${formatDate(item.published_at)}</td>
+        <td>${escapeHtml(item.priority)}</td>
+        <td>${escapeHtml(item.source_name)}</td>
+        <td>${escapeHtml(item.title)}</td>
+        <td>${item.selected
+          ? '<span class="badge teal">入选</span>'
+          : `<span class="badge watch">落选·${escapeHtml((item.rejection_reasons || []).join("、") || "—")}</span>`}</td>
+      </tr>
+    `).join("")
+    : '<tr><td colspan="5" class="empty-cell">近 7 天没有抓到条目；可检查信源健康或手动跑一轮 news fetch --live。</td></tr>';
+}
+
+function renderNewsArticles() {
+  const articles = state.news.articles || [];
+  document.querySelector("#newsArticleRows").innerHTML = articles.length
+    ? articles.map((article) => `
+      <tr>
+        <td><strong>${escapeHtml(article.slug)}</strong></td>
+        <td>v${String(article.version).padStart(3, "0")}</td>
+        <td>${article.mode === "daily" ? "日报" : "周报形态"}</td>
+        <td>${number(article.item_count)}</td>
+        <td>${article.qc
+          ? (article.qc.all_passed
+            ? '<span class="badge teal">通过</span>'
+            : `<span class="badge watch">未过·${escapeHtml(article.qc.failed.join("、") || "条目问题")}</span>`)
+          : '<span class="muted">无记录</span>'}</td>
+        <td>${article.pushed
+          ? `<span class="badge teal">已推送</span><small>${formatDate(article.pushed_at)}</small>`
+          : '<span class="badge">未推送</span>'}</td>
+        <td>${formatDateTime(article.created_at)}</td>
+        <td>${article.preview_ready
+          ? `<button class="text-button" data-news-preview="${article.id}" data-news-title="${escapeHtml(article.slug)} v${String(article.version).padStart(3, "0")}">预览</button>`
+          : '<span class="muted">无产物</span>'}</td>
+      </tr>
+    `).join("")
+    : '<tr><td colspan="8" class="empty-cell">还没有成稿；周一/周四运行 news build --live。</td></tr>';
+  document.querySelectorAll("[data-news-preview]").forEach((button) => {
+    button.addEventListener("click", () => openNewsPreview(button.dataset.newsPreview, button.dataset.newsTitle));
+  });
+}
+
+function openNewsPreview(articleId, title) {
+  const wrap = document.querySelector("#newsPreviewWrap");
+  document.querySelector("#newsPreviewFrame").src = `/api/news/articles/${articleId}/preview`;
+  document.querySelector("#newsPreviewTitle").textContent = title || "";
+  wrap.hidden = false;
+  wrap.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function loadDashboard() {

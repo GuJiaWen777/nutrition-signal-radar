@@ -1,4 +1,5 @@
 import json
+import sys
 import threading
 from datetime import date
 from pathlib import Path
@@ -895,6 +896,158 @@ def test_online_research_can_be_started_from_the_board(tmp_path: Path) -> None:
         assert task_after["latest_draft"]["version"] == 1
         assert task_after["latest_draft"]["is_online_research"] is True
         assert generated["mutation"]["draft_id"] > 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _seed_news_build(tmp_path: Path) -> Path:
+    """Seed a database with one real news build via the compose pipeline."""
+
+    from nutrition_signal_radar.news_compose import build_news_article
+    from nutrition_signal_radar.news_selection import evaluate_pending_news_articles
+    from nutrition_signal_radar.news_registry import seed_news_sources
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from tests.test_news_compose import (
+        FakeComposeGateway,
+        _enable_test_sources,
+        _seed_selected_direct,
+        _valid_payload,
+    )
+    from tests.test_site_fetch_gateway import NOW
+    from datetime import timedelta
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+    _enable_test_sources(database_path)
+    _seed_selected_direct(
+        database_path,
+        [
+            ("测试监管网", "市场监管总局就保健食品原料目录公开征求意见", "https://www.example.gov.cn/w/1", NOW - timedelta(hours=2)),
+            ("测试品牌源", "汤臣倍健发布半年度财报业绩稳健增长", "https://www.example-brand.com/w/1", NOW - timedelta(hours=3)),
+            ("测试展会源", "NHNE健康营养博览会今日开幕", "https://www.example-expo.com/w/1", NOW - timedelta(hours=4)),
+        ],
+    )
+    result = build_news_article(
+        database_path,
+        FakeComposeGateway(lambda _prompt: _valid_payload()),
+        exports_dir=database_path.parent / "exports" / "news-articles",
+        now=NOW,
+    )
+    assert result.status == "built"
+    return database_path
+
+
+def test_news_tab_api_serves_sources_items_and_article_list(tmp_path: Path) -> None:
+    import threading
+    from urllib.request import urlopen
+
+    from nutrition_signal_radar.web_app import create_demo_server as _create
+
+    database_path = _seed_news_build(tmp_path)
+    server = _create(database_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urlopen(f"{base_url}/api/news", timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        assert payload["enabled_count"] >= 3
+        assert any(source["name"] == "测试监管网" for source in payload["sources"])
+        assert payload["selected_count"] == 3
+        assert len(payload["articles"]) == 1
+        article = payload["articles"][0]
+        assert article["mode"] in ("daily", "weekly")
+        assert article["pushed"] is False
+        assert article["preview_ready"] is True
+        # 种子数据正文偏短：QC 的 total_length 未过也必须如实透出给看板
+        assert article["qc"] is not None
+        assert article["qc"]["all_passed"] is False
+        assert "total_length" in article["qc"]["failed"]
+
+        with urlopen(f"{base_url}/api/news/articles/{article['id']}/preview", timeout=5) as response:
+            body = response.read().decode("utf-8")
+            assert response.headers["Content-Type"].startswith("text/html")
+        assert "营养健康行业资讯" in body
+
+        from urllib.error import HTTPError as _HTTPError
+        try:
+            urlopen(f"{base_url}/api/news/articles/99999/preview", timeout=5)
+        except _HTTPError as exc:
+            assert exc.code == 404
+        else:
+            raise AssertionError("expected 404 for unknown article preview")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_news_tab_front_end_contract() -> None:
+    static_root = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "nutrition_signal_radar"
+        / "static"
+    )
+    script = (static_root / "app.js").read_text(encoding="utf-8")
+    index = (static_root / "index.html").read_text(encoding="utf-8")
+
+    assert 'data-tab="news"' in index
+    assert 'id="news"' in index
+    assert 'data-tab="news-sources"' in index
+    assert 'id="news-sources"' in index
+    assert index.index('data-tab="news"') < index.index('data-tab="news-sources"')
+    assert index.index('data-tab="news-sources"') < index.index('data-tab="signals"')
+    # 信源表与资讯线懒加载：两个标签都要能触发数据加载
+    assert '(tabId === "news" || tabId === "news-sources")' in script
+    assert "async function loadNews" in script
+    assert "renderNewsSources" in script
+    assert "renderNewsItems" in script
+    assert "renderNewsArticles" in script
+    assert "/api/news/articles/" in script
+    # 只读约束：/api/news 只允许 GET 读取与预览 src，不允许任何写操作调用
+    news_lines = [line for line in script.splitlines() if "/api/news" in line]
+    assert news_lines, "news API usage missing"
+    for line in news_lines:
+        assert "POST" not in line.upper() or "fetch(" not in line, line.strip()
+    for forbidden in ("/api/news/publish", "/api/news/build", "/api/news/set-source"):
+        assert forbidden not in script, forbidden
+    # 复核清单常驻看板
+    assert "发布前复核清单" in index
+
+
+def test_news_reader_site_serves_index_and_article_html(tmp_path: Path) -> None:
+    import threading
+    from urllib.request import urlopen
+
+    from nutrition_signal_radar.web_app import create_news_reader_server
+
+    database_path = _seed_news_build(tmp_path)
+    server = create_news_reader_server(database_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urlopen(f"{base_url}/", timeout=5) as response:
+            index_html = response.read().decode("utf-8")
+        assert "往期成稿" in index_html
+        assert '/a/1' in index_html
+
+        with urlopen(f"{base_url}/a/1", timeout=5) as response:
+            article_html = response.read().decode("utf-8")
+            assert response.headers["Content-Type"].startswith("text/html")
+        assert "营养健康行业资讯" in article_html
+
+        from urllib.error import HTTPError as _HTTPError
+        try:
+            urlopen(f"{base_url}/a/9999", timeout=5)
+        except _HTTPError as exc:
+            assert exc.code == 404
+        else:
+            raise AssertionError("expected 404 for unknown article")
     finally:
         server.shutdown()
         server.server_close()
