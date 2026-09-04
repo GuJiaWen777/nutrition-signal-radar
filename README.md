@@ -34,6 +34,8 @@ uv sync --extra dev
 .\.venv\Scripts\nutrition-radar.exe news list-items --selected-only  # 查看入选与落选理由
 .\.venv\Scripts\nutrition-radar.exe news build --live                # 摘要成文 + 本地产物
 .\.venv\Scripts\nutrition-radar.exe news publish --live --confirm --slug news-YYYY-MM-DD --version 1
+# 本地阅读站（独立端口，直接展示成稿 HTML；只读，不进调度链）：
+.\.venv\Scripts\nutrition-radar.exe news serve --port 8780 --open
 
 # ── 行业信号线（按需：想做深度选题时跑一轮）──
 .\.venv\Scripts\nutrition-radar.exe sync --live                      # 受控同步公众号文章
