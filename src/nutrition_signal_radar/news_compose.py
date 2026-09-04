@@ -16,10 +16,13 @@ import hashlib
 import html
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urljoin
+
+import requests
 
 from .database import connect_database, transaction
 from .llm_gateway import LlmAnalysisResult
@@ -31,6 +34,7 @@ from .news_selection import (
     url_identity_keys,
 )
 from .schema import initialize_schema
+from .site_fetch_gateway import USER_AGENT
 
 
 _CST = timezone(timedelta(hours=8), name="Asia/Shanghai")
@@ -54,6 +58,14 @@ _SUMMARY_MIN_CHARS = 100
 _SUMMARY_MAX_CHARS = 180
 _IMPLICATION_MAX_CHARS = 45
 _COMPOSE_MAX_RETRIES = 2
+# 填充话术标记：条目只有标题时模型的典型敷衍输出。出现即视为该条
+# 没有可发布的实质内容（与筛选层 missing_body 同源的最后一道闸）。
+_PADDING_MARKERS: tuple[str, ...] = (
+    "仅有标题", "无实质", "无法判断", "暂无法", "信息有限",
+    "原文与标题", "未包含更多", "等待正式文本", "未提供更多",
+    "标题显示", "现有信息仅", "未从现有信息", "需查阅", "未提供具体",
+    "待查阅", "未公布", "无从得知", "与标题相同", "与标题一致", "正文仅",
+)
 # 需求文档内容红线：不得出现的夸张词与疾病治疗类表述。
 _FORBIDDEN_TERMS: tuple[str, ...] = (
     "爆款", "颠覆", "行业巨震", "史诗级", "王炸", "引爆",
@@ -119,6 +131,8 @@ class ComposedItem:
     key_facts: tuple[dict[str, str], ...] = ()
     # news_items.id：跨期排除的关联键（article_id 是 source_articles.id，两者不同）。
     news_item_id: int = 0
+    # 原文配图（og:image 或正文首图，取自原文 URL，微信编辑器粘贴时自动转存）。
+    image_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -156,8 +170,13 @@ def build_news_article(
     logo_path: Path | None = None,
     actor: str = "news-build",
     now: datetime | None = None,
+    fetch_lead_images: bool = False,
 ) -> NewsBuildResult:
-    """Summarize selected items and assemble a versioned local article."""
+    """Summarize selected items and assemble a versioned local article.
+
+    ``fetch_lead_images`` 打开时，对入选条目逐条请求原文详情页提取配图
+    （最多 max_items 条、单条 12 秒超时、失败静默降级为纯文字）。
+    """
 
     if lookback_hours < 1:
         raise NewsComposeError("lookback_hours must be at least 1")
@@ -198,6 +217,15 @@ def build_news_article(
         )
 
     composed, excluded = _compose_items(gateway, items)
+    if fetch_lead_images and composed:
+        session = requests.Session()
+        session.trust_env = False  # 与抓取网关一致的直连策略
+        composed = [
+            replace(item, image_url=_extract_lead_image(session, str(item.url or "")))
+            if item.url
+            else item
+            for item in composed
+        ]
     seen_dupe_ids = {row["article_id"] for row in excluded}
     for dupe in (*daily_dupes, *weekly_dupes):
         if dupe["article_id"] in seen_dupe_ids:
@@ -220,6 +248,7 @@ def build_news_article(
         slug = weekly_slug
 
     insights = _compose_insights(gateway, composed)
+    viewpoint = _compose_viewpoint(gateway, composed)
     title = _build_title(mode, composed)
     title_provenance = "mechanical"
     if mode == "daily" and len(composed) and len(_focus_from_title(composed[0].display_title or composed[0].title)) > _TITLE_SOFT_LIMIT:
@@ -237,7 +266,7 @@ def build_news_article(
             title_provenance = "mechanical_truncated"
     article = _ArticleDocument(
         mode=mode, title=title, items=composed, insights=insights,
-        generated_at=current_time,
+        generated_at=current_time, viewpoint=viewpoint,
     )
     markdown = _render_markdown(article)
     html_text = _render_html(article)
@@ -254,6 +283,7 @@ def build_news_article(
         markdown=markdown,
         html_text=html_text,
         insights=insights,
+        viewpoint=viewpoint,
         qc=qc,
         llm_model=llm_model,
         title_provenance=title_provenance,
@@ -265,6 +295,61 @@ def build_news_article(
 
 # ---------------------------------------------------------------------------
 # Candidate loading
+
+
+_LEAD_IMAGE_TIMEOUT_SECONDS = 12.0
+# 通用装饰图通常带这些痕迹；带它们的一律不当作正文配图。
+_LEAD_IMAGE_BLOCKLIST = ("logo", "icon", "sprite", ".svg", ".gif", "qrcode", "captcha")
+nl = "\n"
+
+
+def _normalize_image_candidate(src: str, base_url: str, *, require_extension: bool) -> str:
+    value = html.unescape(str(src or "")).strip().split()[0] if str(src or "").strip() else ""
+    if not value or value.lower().startswith(("data:", "javascript:")):
+        return ""
+    absolute = urljoin(base_url, value)
+    if not absolute.startswith(("http://", "https://")):
+        return ""
+    lowered = absolute.lower()
+    if any(token in lowered for token in _LEAD_IMAGE_BLOCKLIST):
+        return ""
+    if require_extension and not lowered.split("?", 1)[0].endswith((".jpg", ".jpeg", ".png", ".webp")):
+        return ""
+    return absolute
+
+
+def _extract_lead_image(session: requests.Session, url: str) -> str:
+    """Fetch one original article page and extract its lead image URL.
+
+    只取原文页面自身携带的图（og:image 优先，其次正文首图），不做任何
+    生成或替换；失败一律返回空串，条目保持纯文字。单条有界超时。
+    """
+
+    if not url or not url.startswith(("http://", "https://")):
+        return ""
+    try:
+        response = session.get(
+            url, headers={"User-Agent": USER_AGENT}, timeout=_LEAD_IMAGE_TIMEOUT_SECONDS
+        )
+        if response.status_code != 200:
+            return ""
+        page = response.text
+    except Exception:
+        return ""
+    for pattern in (
+        r"<meta[^>]+property=[\"']og:image[\"'][^>]*content=[\"']([^\"']+)[\"']",
+        r"<meta[^>]+content=[\"']([^\"']+)[\"'][^>]*property=[\"']og:image[\"']",
+    ):
+        match = re.search(pattern, page, re.IGNORECASE)
+        if match:
+            candidate = _normalize_image_candidate(match.group(1), url, require_extension=False)
+            if candidate:
+                return candidate
+    for match in re.finditer(r"<img[^>]+src=[\"']([^\"']+)[\"']", page, re.IGNORECASE):
+        candidate = _normalize_image_candidate(match.group(1), url, require_extension=True)
+        if candidate:
+            return candidate
+    return ""
 
 
 def _daily_slug_for(moment: datetime) -> str:
@@ -323,7 +408,12 @@ def _load_selected_items(
 def _cap_per_source(
     items: list[dict[str, object]], max_items: int
 ) -> list[dict[str, object]]:
-    """同一信源最多入选 _MAX_ITEMS_PER_SOURCE 条，保证来源多样性。"""
+    """同一信源上限 _MAX_ITEMS_PER_SOURCE 条，保证来源多样性。
+
+    例外：截断后不足 _MIN_ITEMS_FOR_DAILY 时，允许同源条目按原排序
+    补足到 3——单一活跃源的场景不为多样性饿死期次，但也不同源灌满
+    整期（补足上限即停）。
+    """
 
     per_source: dict[str, int] = {}
     kept: list[dict[str, object]] = []
@@ -335,6 +425,16 @@ def _cap_per_source(
         kept.append(item)
         if len(kept) >= max_items:
             break
+    if len(kept) >= _MIN_ITEMS_FOR_DAILY:
+        return kept
+    kept_ids = {id(item) for item in kept}
+    for item in items:
+        if len(kept) >= _MIN_ITEMS_FOR_DAILY:
+            break
+        if id(item) in kept_ids:
+            continue
+        kept.append(item)
+        kept_ids.add(id(item))
     return kept
 
 
@@ -466,12 +566,17 @@ def _summarize(
         summary, implication, keywords, raw_facts, headline = parsed
         if _contains_forbidden(summary) or _contains_forbidden(implication):
             continue
+        if _contains_padding(summary) or _contains_padding(implication):
+            continue
         # 反虚构硬校验：value 必须逐字出现在已抓取原文中，否则丢弃。
         original_text = str(item.get("content_snapshot") or "") + str(item["title"])
         verified_facts = tuple(
             fact
             for fact in raw_facts
-            if fact["value"] and fact["value"] in original_text
+            if fact["value"]
+            and fact["value"] in original_text
+            and len(fact["value"].strip()) >= 4
+            and any(ch not in "0123456789.,%年月日" for ch in fact["value"].strip())
         )
         return ComposedItem(
             article_id=int(item["article_id"]),
@@ -548,6 +653,61 @@ class _ArticleDocument:
     items: list[ComposedItem]
     insights: tuple[str, ...]
     generated_at: datetime
+    viewpoint: str = ""
+
+
+def _contains_padding(text: str) -> bool:
+    return any(marker in text for marker in _PADDING_MARKERS)
+
+
+def _viewpoint_corpus(composed: list[ComposedItem]) -> str:
+    parts: list[str] = [composed[0].title if composed else ""]
+    for item in composed:
+        parts.extend(
+            [item.title, item.summary, item.implication, item.display_title]
+        )
+        parts.extend(fact.get("value", "") for fact in item.key_facts)
+    return nl.join(parts)
+
+
+def _verify_viewpoint(text: str, composed: list[ComposedItem]) -> bool:
+    """观点红线：字数、违禁词、数字必须逐字来自本期条目。"""
+
+    if not _VIEWPOINT_MIN_CHARS <= len(text) <= _VIEWPOINT_MAX_CHARS:
+        return False
+    if _contains_forbidden(text):
+        return False
+    if _contains_padding(text):
+        return False
+    corpus = _viewpoint_corpus(composed)
+    return all(run in corpus for run in re.findall(r"\d+(?:\.\d+)?", text))
+
+
+def _compose_viewpoint(gateway, composed: list[ComposedItem]) -> str:
+    """One stance-taking editorial view over this issue's own items only."""
+
+    if not composed:
+        return ""
+    lines = nl.join(
+        f"- {item.title}：{item.summary}（含义：{item.implication}）"
+        for item in composed
+    )
+    user_prompt = (
+        f"本期标题与条目：{nl}{lines}{nl}请按系统约定输出 JSON。"
+    )
+    for _ in range(_COMPOSE_MAX_RETRIES + 1):
+        try:
+            result = gateway.analyze(_VIEWPOINT_SYSTEM_PROMPT, user_prompt, json_object=True)
+        except Exception:
+            return ""
+        try:
+            payload = json.loads(result.content)
+        except json.JSONDecodeError:
+            continue
+        candidate = str(payload.get("viewpoint") or "").strip() if isinstance(payload, dict) else ""
+        if candidate and _verify_viewpoint(candidate, composed):
+            return candidate
+    return ""
 
 
 def _mechanical_truncate(text: str, limit: int) -> str:
@@ -601,6 +761,19 @@ _INSIGHTS_SYSTEM_PROMPT = (
     "不得引入任何外部信息或预测；每条不超过 60 字；不得使用夸张表述。"
     '输出 JSON 对象：{"insights": ["观察一", "观察二"]}。'
 )
+
+# 「EarlyData观点」：全文级编辑部立场（对标行业媒体的「XX观点」栏目）。
+# 只基于本期条目做判断，不得引入外部信息；数字必须逐字来自条目原文。
+_VIEWPOINT_SYSTEM_PROMPT = (
+    "你是「EarlyData观点」栏目的主笔，为营养健康行业资讯写全文级编辑部观点。"
+    "基于本期条目给出一个鲜明的行业判断：先下结论，再给一条行业含义或趋势判断，"
+    "立场清晰、不用中性复述，不出现『我认为』。只允许依据给定条目，"
+    "不得引入任何外部事实、事件、企业或数据；正文数字必须逐字来自给定条目；"
+    "60-140 字；不得使用夸张或疾病治疗表述。"
+    '输出 JSON 对象：{"viewpoint": "观点正文"}。'
+)
+_VIEWPOINT_MIN_CHARS = 60
+_VIEWPOINT_MAX_CHARS = 140
 
 
 def _compose_insights(gateway, composed: list[ComposedItem]) -> tuple[str, ...]:
@@ -699,10 +872,9 @@ def _render_markdown(article: _ArticleDocument) -> str:
         "",
         f"营养健康行业资讯 · {article.generated_at:%Y.%m.%d}",
         "",
-        "## 导语",
-        "",
-        _lead_paragraph(article),
-        "",
+        *(
+            [f"> **EarlyData观点**：{article.viewpoint}", ""] if article.viewpoint else []
+        ),
     ]
     if article.insights:
         lines.append("## 本期速览")
@@ -715,6 +887,9 @@ def _render_markdown(article: _ArticleDocument) -> str:
         for item in members:
             lines.append(f"### {item.display_title or item.title}")
             lines.append("")
+            if item.image_url:
+                lines.append(f"![原文配图]({item.image_url})")
+                lines.append("")
             lines.append(item.summary)
             lines.append("")
             if item.key_facts:
@@ -741,20 +916,11 @@ def _render_markdown(article: _ArticleDocument) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _lead_paragraph(article: _ArticleDocument) -> str:
-    involved = "、".join(section_label(section) for section, _ in _grouped_sections(article.items))
-    return (
-        f"本期收录 {len(article.items)} 条营养健康产业公开资讯，"
-        f"涉及{involved}。"
-    )
-
-
 def _info_note(article: _ArticleDocument) -> str:
     """文末信息说明：收录统计 + 监测日期 + 整理声明，自包含。"""
 
     return (
-        f"信息说明：{_lead_paragraph(article)}"
-        f"监测日期：{article.generated_at:%Y.%m.%d}。"
+        f"信息说明：监测日期：{article.generated_at:%Y.%m.%d}。"
         "本文根据公开信息整理，具体内容以原始发布方为准。"
     )
 
@@ -776,11 +942,18 @@ def _render_html(article: _ArticleDocument) -> str:
                 if item.url
                 else ""
             )
+            image_html = (
+                f'<p style="margin:0 0 10px;"><img src="{html.escape(item.image_url, quote=True)}" '
+                f'style="max-width:100%;border-radius:6px;display:block;" alt="原文配图"/></p>'
+                if item.image_url
+                else ""
+            )
             blocks.append(
                 f'<section style="margin:0 0 26px;">'
                 f'<p style="margin:0 0 8px;font-size:17px;font-weight:700;color:{_BRAND_COLORS["title"]};'
                 f'line-height:1.6;">{esc(item.display_title or item.title)}</p>'
-                f'<p style="margin:0 0 10px;font-size:16px;color:{_BRAND_COLORS["body"]};line-height:1.9;">'
+                + image_html
+                + f'<p style="margin:0 0 10px;font-size:16px;color:{_BRAND_COLORS["body"]};line-height:1.9;">'
                 f"{esc(item.summary)}</p>"
                 + (
                     f'<p style="margin:0 0 10px;font-size:14px;color:{_BRAND_COLORS["body"]};'
@@ -813,6 +986,16 @@ def _render_html(article: _ArticleDocument) -> str:
         f'border-radius:4px;">{esc(word)}</span>'
         for word in _article_keywords(article.items)
     )
+    viewpoint_html = (
+        f'<section style="margin:0 18px 22px;padding:12px 16px;'
+        f'background:{_BRAND_COLORS["title"]};border-radius:6px;">'
+        f'<p style="margin:0 0 4px;font-size:13px;color:{_BRAND_COLORS["green"]};'
+        f'letter-spacing:0.12em;font-weight:700;">EARLYDATA 观点</p>'
+        f'<p style="margin:0;font-size:16px;color:#FFFFFF;line-height:1.9;">'
+        f"{esc(article.viewpoint)}</p></section>"
+        if article.viewpoint
+        else ""
+    )
     return (
         f'<section style="max-width:660px;margin:0 auto;background:#FFFFFF;'
         f"font-family:'Noto Sans SC','PingFang SC','Microsoft YaHei',Arial,Helvetica,sans-serif;\">"
@@ -823,9 +1006,7 @@ def _render_html(article: _ArticleDocument) -> str:
         f'line-height:1.4;text-align:left;">{esc(article.title)}</h1>'
         f'<p style="margin:0;font-size:14px;color:{_BRAND_COLORS["muted"]};">'
         f"{article.generated_at:%Y.%m.%d}｜政策 · 品牌 · 展会</p></section>"
-        f'<section style="margin:0 18px 22px;padding:14px 16px;background:{_BRAND_COLORS["panel"]};'
-        f'border-radius:6px;"><p style="margin:0;font-size:16px;color:{_BRAND_COLORS["body"]};'
-        f'line-height:1.8;">{esc(_lead_paragraph(article))}</p></section>'
+        + viewpoint_html
         + (
             f'<section style="margin:0 18px 22px;padding:0 16px;">'
             f'<p style="margin:0 0 6px;font-size:15px;font-weight:700;'
@@ -911,6 +1092,7 @@ def _write_build(
     markdown: str,
     html_text: str,
     insights: tuple[str, ...],
+    viewpoint: str,
     qc: dict[str, object],
     llm_model: str,
     title_provenance: str,
@@ -951,6 +1133,7 @@ def _write_build(
                 "title": title,
                 "title_provenance": title_provenance,
                 "insights": list(insights),
+                "viewpoint": viewpoint,
                 "llm_model": llm_model,
                 "items": [item.__dict__ for item in composed],
                 "excluded_items": excluded,

@@ -55,6 +55,11 @@ INDUSTRY_TERMS: tuple[str, ...] = (
     "新食品原料", "食品原料", "婴幼儿配方", "乳粉", "奶粉", "DHA", "低GI",
     "甜味剂", "功能声称", "保健",
 )
+# 展会信源的放宽词：主办方发的参展/活动内容天然属于产业资讯，
+# 不再要求标题同时命中营养词表（避免「XX企业亮相XX展」被误杀）。
+_EXPO_TERMS: tuple[str, ...] = (
+    "展会", "博览", "参展", "展商", "亮相", "峰会", "论坛", "巡回",
+)
 ACTION_TERMS: tuple[str, ...] = (
     "发布", "印发", "征求意见", "通报", "处罚", "罚", "吊销", "责令", "立案",
     "整治", "批准", "获批", "注册", "备案", "许可", "披露", "财报", "业绩",
@@ -176,6 +181,23 @@ def evaluate_pending_news_articles(database_path: Path) -> NewsSelectionReport:
     decisions: list[NewsItemDecision] = []
     try:
         with transaction(connection):
+            # 正文补全后的重开：因 missing_body 被拒、但 source_articles 的
+            # 快照如今已是真实正文的条目，删除旧评估记录重新参评。这是数据
+            # 修正而非决策反转——当时判的是「无正文」，前提已变。
+            connection.execute(
+                """
+                DELETE FROM news_items
+                WHERE id IN (
+                    SELECT ni.id FROM news_items ni
+                    JOIN source_articles sa ON sa.id = ni.article_id
+                    WHERE ni.selected = 0
+                      AND ni.rejection_reasons LIKE '%missing_body%'
+                      AND length(replace(sa.content_snapshot, ' ', '')) >= 60
+                      AND replace(sa.content_snapshot, ' ', '')
+                          != replace(ni.title, ' ', '')
+                )
+                """
+            )
             prior = _load_recent_selected_index(connection)
             for row in _pending_rows(connection):
                 decision = _decide(row, prior)
@@ -283,10 +305,21 @@ def _decide(row: sqlite3.Row, prior: dict[str, object]) -> NewsItemDecision:
         reasons.append({"code": "missing_date", "detail": "缺少发布日期，无法核验时效"})
     if not url:
         reasons.append({"code": "missing_url", "detail": "缺少原文链接"})
-    if len(body) < _MIN_TITLE_LENGTH:
-        reasons.append({"code": "missing_body", "detail": "缺少正文或摘要"})
+    body_norm = re.sub(r"\s+", "", body)
+    title_norm = re.sub(r"\s+", "", title)
+    # 标题快照（正文=标题，或比标题长不了几个字）等于没有正文：
+    # 这类条目进成文只会产出复述标题的填充话术，直接拦下。
+    if (
+        len(body) < _MIN_TITLE_LENGTH
+        or body_norm == title_norm
+        or len(body_norm) < 15
+    ):
+        reasons.append({"code": "missing_body", "detail": "正文仅有标题或无实质内容"})
+    source_category = str(row["source_category"])
     relevant = _contains_any(haystack, INDUSTRY_TERMS) or (
-        str(row["source_category"]) in ("policy", "disclosure") and "食品" in haystack
+        source_category in ("policy", "disclosure") and "食品" in haystack
+    ) or (
+        source_category == "expo" and _contains_any(haystack, _EXPO_TERMS)
     )
     if not relevant:
         reasons.append({"code": "not_relevant", "detail": "未命中营养健康产业相关词，与产业不直接相关"})
@@ -300,7 +333,9 @@ def _decide(row: sqlite3.Row, prior: dict[str, object]) -> NewsItemDecision:
         reasons.append({"code": "duplicate_url", "detail": "同一原文链接或同一站点文章编号已入选"})
     elif duplicate_code == "duplicate_title":
         reasons.append({"code": "duplicate_title", "detail": "标题与近期已入选条目近似重复"})
-    if not _contains_any(haystack, ACTION_TERMS):
+    # 展会源的参展/活动预告没有政策或公司「动作」，但本身就是产业动态：
+    # 该类目跳过行动信息门（相关性已由 _EXPO_TERMS 把关）。
+    if source_category != "expo" and not _contains_any(haystack, ACTION_TERMS):
         reasons.append({"code": "no_action_info", "detail": "没有明确的政策动作、公司动作或会议信息"})
 
     section, section_reason = _classify_section(str(row["source_category"]), haystack)

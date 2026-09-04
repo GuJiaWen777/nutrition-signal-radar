@@ -9,6 +9,7 @@ from nutrition_signal_radar.article_contract import (
 )
 from nutrition_signal_radar import cli
 from nutrition_signal_radar.cli import main
+from nutrition_signal_radar.database import connect_database
 from nutrition_signal_radar.ingest_service import import_article_batch
 from nutrition_signal_radar.llm_gateway import LlmAnalysisResult
 from nutrition_signal_radar.news_compose import build_news_article
@@ -764,3 +765,301 @@ def test_build_excludes_items_consumed_by_previous_issues(tmp_path: Path) -> Non
     assert rebuild.status == "built"
     assert rebuild.slug == third.slug and rebuild.version == 2
     assert len(_article_item_titles(database_path, rebuild.slug, rebuild.version)) == 3
+
+
+def test_extract_lead_image_prefers_og_image_and_filters_decorative() -> None:
+    from nutrition_signal_radar.news_compose import _extract_lead_image
+
+    class FakeImageResp:
+        def __init__(self, text, status_code=200):
+            self.text = text
+            self.status_code = status_code
+
+    class FakeImageSession:
+        def __init__(self, text):
+            self._text = text
+
+        def get(self, url, **kwargs):
+            return FakeImageResp(self._text)
+
+    base = "https://www.example-brand.com/news/1.html"
+    og_page = (
+        '<html><head><meta property="og:image" '
+        'content="https://www.example-brand.com/img/lead.jpg"></head></html>'
+    )
+    assert (
+        _extract_lead_image(FakeImageSession(og_page), base)
+        == "https://www.example-brand.com/img/lead.jpg"
+    )
+    body_page = (
+        '<body><img src="/static/logo.png"><img src="/upload/2026/09/photo.webp"></body>'
+    )
+    assert (
+        _extract_lead_image(FakeImageSession(body_page), base)
+        == "https://www.example-brand.com/upload/2026/09/photo.webp"
+    )
+    assert _extract_lead_image(FakeImageSession("<p>纯文字公告</p>"), base) == ""
+    assert _extract_lead_image(FakeImageSession("<p>x</p>"), "") == ""
+
+
+def test_render_html_embeds_original_image_when_present(tmp_path: Path) -> None:
+    from nutrition_signal_radar import news_compose as compose
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _seed_four_selected_items(database_path)
+
+    def payload_with_image(_prompt: str) -> str:
+        return _valid_payload()
+
+    gateway = FakeComposeGateway(payload_with_image)
+    exports_dir = tmp_path / "var" / "exports" / "news-articles"
+    # 打开配图开关并把提取器替换为固定返回，避免真实网络
+    original = compose._extract_lead_image
+    compose._extract_lead_image = lambda session, url: (
+        "https://www.example-brand.com/img/lead.jpg" if url else ""
+    )
+    try:
+        result = build_news_article(
+            database_path,
+            gateway,
+            exports_dir=exports_dir,
+            llm_model="deepseek-chat",
+            now=NOW,
+            fetch_lead_images=True,
+        )
+    finally:
+        compose._extract_lead_image = original
+
+    assert result.status == "built"
+    html_text = (Path(result.detail) / "news-article.html").read_text(encoding="utf-8")
+    assert '<img src="https://www.example-brand.com/img/lead.jpg"' in html_text
+    markdown = (Path(result.detail) / "news-article.md").read_text(encoding="utf-8")
+    assert "![原文配图](https://www.example-brand.com/img/lead.jpg)" in markdown
+    manifest = json.loads((Path(result.detail) / "manifest.json").read_text(encoding="utf-8"))
+    assert all(item.get("image_url") for item in manifest["items"])
+
+
+_VALID_VIEWPOINT = (
+    "监管备案与抽检通告同日密集发布，显示网络食品销售正在进入全链条合规时代；"
+    "平台备案透明度提升后，第三方渠道的合规能力将成为品牌方选择合作方的核心考量。"
+)
+_FABRICATED_VIEWPOINT = (
+    "监管备案与抽检通告同日密集发布，显示全年1.2万家企业进入合规时代；"
+    "平台备案透明度提升后，第三方渠道的合规能力将成为品牌方的核心考量。"
+)
+
+
+def _viewpoint_gateway(viewpoint_text: str) -> FakeComposeGateway:
+    def responder(prompt: str) -> str:
+        if prompt.startswith("本期标题与条目"):  # viewpoint 调用的 user prompt 前缀
+            return json.dumps({"viewpoint": viewpoint_text})
+        return _valid_payload()
+
+    return FakeComposeGateway(responder)
+
+
+def test_build_adds_earlydata_viewpoint_block(tmp_path: Path) -> None:
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _seed_four_selected_items(database_path)
+    exports_dir = tmp_path / "var" / "exports" / "news-articles"
+
+    result = build_news_article(
+        database_path,
+        _viewpoint_gateway(_VALID_VIEWPOINT),
+        exports_dir=exports_dir,
+        llm_model="deepseek-chat",
+        now=NOW,
+    )
+    assert result.status == "built"
+    build_dir = Path(result.detail)
+    html_text = (build_dir / "news-article.html").read_text(encoding="utf-8")
+    assert "EARLYDATA 观点" in html_text
+    assert "全链条合规时代" in html_text
+    markdown = (build_dir / "news-article.md").read_text(encoding="utf-8")
+    assert "> **EarlyData观点**：" in markdown
+    manifest = json.loads((build_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["viewpoint"].startswith("监管备案与抽检通告")
+
+
+def test_viewpoint_with_fabricated_number_is_rejected(tmp_path: Path) -> None:
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _seed_four_selected_items(database_path)
+    exports_dir = tmp_path / "var" / "exports" / "news-articles"
+
+    result = build_news_article(
+        database_path,
+        _viewpoint_gateway(_FABRICATED_VIEWPOINT),
+        exports_dir=exports_dir,
+        llm_model="deepseek-chat",
+        now=NOW,
+    )
+    assert result.status == "built"
+    build_dir = Path(result.detail)
+    html_text = (build_dir / "news-article.html").read_text(encoding="utf-8")
+    # 捏造的「1.2万家」不在条目语料中：观点被整体拒绝，不出现在成稿
+    assert "EARLYDATA 观点" not in html_text
+    assert "1.2万家" not in html_text
+    manifest = json.loads((build_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["viewpoint"] == ""
+
+
+def test_single_active_source_backfills_to_daily_floor(tmp_path: Path) -> None:
+    """只有一个活跃信源时，同源条目补足到 3 条，不再被单源上限饿死。"""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _enable_test_sources(database_path)
+    gov = "测试监管网"
+    _seed_selected_direct(
+        database_path,
+        [
+            (gov, "市场监管总局就保健食品原料目录公开征求意见", "https://www.example.gov.cn/s/1", NOW - timedelta(hours=2)),
+            (gov, "监管部门通报保健食品虚假宣传典型案例处罚结果", "https://www.example.gov.cn/s/2", NOW - timedelta(hours=3)),
+            (gov, "三部门联合开展保健食品行业清理整顿专项行动", "https://www.example.gov.cn/s/3", NOW - timedelta(hours=4)),
+        ],
+    )
+    result = build_news_article(
+        database_path,
+        FakeComposeGateway(lambda _prompt: _valid_payload()),
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        now=NOW,
+    )
+    assert result.status == "built" and result.mode == "daily"
+    assert result.item_count == 3
+    build_dir = Path(result.detail)
+    html_text = (build_dir / "news-article.html").read_text(encoding="utf-8")
+    assert "本期收录" not in html_text  # 导语块已移除
+
+
+def test_padding_summary_and_trivial_key_facts_are_rejected(tmp_path: Path) -> None:
+    """只有标题的条目：填充话术摘要被拒、碎片关键信息被滤，整条不足则跳过。"""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _seed_four_selected_items(database_path)
+    # 直接把四条条目的正文压成标题同文，模拟「只有标题」的抓取结果
+    import sqlite3 as _sq
+
+    connection = _sq.connect(database_path)
+    connection.execute(
+        """
+        UPDATE source_articles SET content_snapshot = title
+        WHERE id IN (SELECT article_id FROM news_items WHERE selected = 1)
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    def padding_payload(prompt: str) -> str:
+        return json.dumps(
+            {
+                "summary": (
+                    "监管部门发布相关公示，该公示的原文与标题一致，未包含更多数据、"
+                    "期限或决议，本次公示仅表明相关主体进入备案环节，暂无法判断影响。"
+                )
+                * 1,
+                "implication": VALID_IMPLICATION,
+                "keywords": ["保健食品"],
+            }
+        )
+
+    result = build_news_article(
+        database_path,
+        FakeComposeGateway(padding_payload),
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        now=NOW,
+    )
+    assert result.status == "skipped"
+    assert "摘要契约" in result.detail
+
+
+def test_key_facts_filter_short_numeric_fragments(tmp_path: Path) -> None:
+    from nutrition_signal_radar.news_compose import _summarize
+
+    class StaticGateway:
+        def analyze(self, system_prompt, user_prompt, *, json_object=True):
+            return LlmAnalysisResult(
+                status="completed",
+                content=json.dumps(
+                    {
+                        "summary": (
+                            "浙江省市场监督管理局发布本年度第27期食品安全监督抽检信息通告，"
+                            "共披露1.2万家企业的抽检结果，覆盖保健食品、网络食品销售等类别，"
+                            "通告列示了不合格产品与企业名单，并说明已移交属地监管部门处置，"
+                            "合格率与上期相比保持稳定。"
+                        ),
+                        "implication": "抽检常态化持续压实网络食品销售企业的合规责任。",
+                        "keywords": ["抽检"],
+                        "key_facts": [
+                            {"kind": "fact", "value": "27", "note": "期数"},
+                            {"kind": "fact", "value": "1.2万家", "note": "覆盖企业"},
+                        ],
+                    }
+                ),
+                prompt_tokens=10,
+                completion_tokens=10,
+                error="",
+            )
+
+    item = {
+        "article_id": 1,
+        "news_item_id": 0,
+        "title": "浙江省市场监督管理局食品安全监督抽检信息通告（2026年第27期）",
+        "source_name": "测试监管网",
+        "section": "policy",
+        "priority": "P0",
+        "url": "https://www.example.gov.cn/x/1",
+        "published_at": "2026-08-31 10:00:00",
+        "content_snapshot": (
+            "浙江省市场监督管理局发布第27期抽检通告，共披露1.2万家企业的抽检结果。"
+        ),
+    }
+    composed = _summarize(StaticGateway(), item)
+    assert composed is not None
+    values = [fact["value"] for fact in composed.key_facts]
+    assert values == ["1.2万家"]  # 「27」太碎片，被过滤
+
+
+def test_fetch_enriches_headline_only_items_from_detail_page(tmp_path: Path) -> None:
+    """列表页只有标题的条目：fetch 时补一次详情页正文，过 missing_body 门。"""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+    _enable_test_sources(database_path)
+    detail_text = (
+        "广东省市场监督管理局在全省范围开展椰子水生产企业全覆盖风险排查，"
+        "重点核查食品原料收购、杀菌工艺与标签标识等环节，共出动执法人员230人次，"
+        "检查生产企业45家，对2家不符合要求的企业责令整改，相关结果已向社会公布。"
+    )
+    feed_xml = (
+        '<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>'
+        "<item><title>广东开展椰子水生产企业全覆盖风险排查</title>"
+        "<link>https://www.example.gov.cn/y/1</link>"
+        "<pubDate>Mon, 31 Aug 2026 10:00:00 +0800</pubDate>"
+        "</item></channel></rss>"
+    )
+    detail_html = f"<html><body>{''.join(f'<p>{para}</p>' for para in detail_text.split('，'))}</body></html>"
+    session = FakeSession()
+    session.queue("https://www.example.gov.cn/feed.xml", FakeResponse(feed_xml))
+    session.queue("https://www.example.gov.cn/y/1", FakeResponse(detail_html))
+
+    from nutrition_signal_radar.news_fetch_service import fetch_enabled_news_sources
+
+    fetch_result = fetch_enabled_news_sources(
+        database_path,
+        session=session,
+        lookback_hours=24,
+        max_items_per_source=30,
+        raw_dir=database_path.parent / "raw" / "sites",
+        now=NOW,
+    )
+    assert fetch_result.articles_inserted == 1
+
+    selection = evaluate_pending_news_articles(database_path)
+    assert selection.selected == 1  # 补全后的正文通过了 missing_body 与相关性门
+    connection = connect_database(database_path, readonly=True)
+    try:
+        snapshot = connection.execute(
+            "SELECT content_snapshot FROM source_articles"
+        ).fetchone()["content_snapshot"]
+    finally:
+        connection.close()
+    assert "椰子水生产企业全覆盖风险排查" in snapshot

@@ -360,3 +360,136 @@ def test_policy_sources_count_bare_food_terms_as_relevant(tmp_path: Path) -> Non
     item = list_news_items(database_path, selected_only=True)[0]
     assert item.section == "policy"
     assert item.priority == "P0"
+
+
+def test_expo_source_counts_exhibition_terms_as_relevant(tmp_path: Path) -> None:
+    """展会源：参展/亮相类标题即视为相关，不再要求同时命中营养词表。"""
+
+    import sqlite3
+
+    from nutrition_signal_radar.news_registry import seed_news_sources
+    from nutrition_signal_radar.news_selection import evaluate_pending_news_articles
+    from nutrition_signal_radar.news_registry import configure_news_source, set_news_source_enabled
+    from nutrition_signal_radar.ingest_service import import_article_batch
+    from nutrition_signal_radar.article_contract import ArticleBatch, NormalizedArticle, external_id_for_article
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+    configure_news_source(
+        database_path,
+        name="测试展会源",
+        domain="example-expo.com",
+        category="expo",
+        entry_url="https://www.example-expo.com/feed",
+        fetch_kind="rss",
+        default_priority="P2",
+    )
+    set_news_source_enabled(database_path, name="测试展会源", enabled=True)
+    published = "2026-08-31 10:00:00"
+    article = NormalizedArticle(
+        external_id=external_id_for_article(
+            url="https://www.example-expo.com/news/1",
+            account_name="测试展会源",
+            title="白云山汉方将携硬核产品矩阵亮相2026健康营养春季展",
+            published_at=published,
+            content_hash=None,
+        ),
+        account_name="测试展会源",
+        title="白云山汉方将携硬核产品矩阵亮相2026健康营养春季展",
+        published_at=published,
+        url="https://www.example-expo.com/news/1",
+        content_snapshot="白云山汉方确认参展，将展示植物提取物与营养健康原料解决方案。",
+        content_hash=None,
+    )
+    import_article_batch(
+        database_path,
+        ArticleBatch(
+            source_kind="news",
+            source_path="direct",
+            source_fingerprint="expo-direct",
+            source_rows=1,
+            articles=(article,),
+            account_segment="news_source",
+        ),
+    )
+    report = evaluate_pending_news_articles(database_path)
+    assert report.selected == 1
+
+
+def test_rejected_missing_body_items_reopen_after_body_enrichment(tmp_path: Path) -> None:
+    """missing_body 被拒条目在正文补全后自动重开重评。"""
+
+    import sqlite3
+
+    from nutrition_signal_radar.article_contract import (
+        ArticleBatch,
+        NormalizedArticle,
+        external_id_for_article,
+    )
+    from nutrition_signal_radar.ingest_service import import_article_batch
+    from nutrition_signal_radar.news_registry import (
+        configure_news_source,
+        seed_news_sources,
+        set_news_source_enabled,
+    )
+    from nutrition_signal_radar.news_selection import evaluate_pending_news_articles
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+    configure_news_source(
+        database_path,
+        name="测试监管网",
+        domain="example.gov.cn",
+        category="policy",
+        entry_url="https://www.example.gov.cn/feed",
+        fetch_kind="rss",
+        default_priority="P0",
+    )
+    set_news_source_enabled(database_path, name="测试监管网", enabled=True)
+    title = "广东开展椰子水生产企业全覆盖风险排查"
+    article = NormalizedArticle(
+        external_id=external_id_for_article(
+            url="https://www.example.gov.cn/y/1",
+            account_name="测试监管网",
+            title=title,
+            published_at="2026-08-31 10:00:00",
+            content_hash=None,
+        ),
+        account_name="测试监管网",
+        title=title,
+        published_at="2026-08-31 10:00:00",
+        url="https://www.example.gov.cn/y/1",
+        content_snapshot=title,  # 标题快照：首轮必被 missing_body 拒
+        content_hash=None,
+    )
+    import_article_batch(
+        database_path,
+        ArticleBatch(
+            source_kind="news",
+            source_path="direct",
+            source_fingerprint="reopen",
+            source_rows=1,
+            articles=(article,),
+            account_segment="news_source",
+        ),
+    )
+    first = evaluate_pending_news_articles(database_path)
+    assert first.rejection_counts.get("missing_body") == 1
+
+    # 模拟 fetch 的正文补全：快照换成真实正文
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "UPDATE source_articles SET content_snapshot = ? WHERE url = ?",
+        (
+            "广东省市场监督管理局在全省范围开展椰子水生产企业的食品质量安全"
+            "全覆盖风险排查，重点核查食品原料收购、杀菌工艺与标签标识环节，"
+            "对不符合要求的企业责令整改并公布结果。",
+            "https://www.example.gov.cn/y/1",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    second = evaluate_pending_news_articles(database_path)
+    assert second.evaluated == 1  # 重开并重新评估
+    assert second.selected == 1

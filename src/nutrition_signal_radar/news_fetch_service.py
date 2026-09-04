@@ -9,7 +9,9 @@ caller passes a real HTTP session, which the CLI does behind ``--live``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import html
+import re
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Sequence
@@ -23,7 +25,7 @@ from .news_registry import (
     list_enabled_news_sources,
     record_news_source_health,
 )
-from .site_fetch_gateway import fetch_site_source
+from .site_fetch_gateway import USER_AGENT, fetch_site_source
 
 
 class NewsFetchError(RuntimeError):
@@ -87,6 +89,76 @@ class NewsFetchReport:
             "articles_updated": self.articles_updated,
             "outcomes": [outcome.as_dict() for outcome in self.outcomes],
         }
+
+
+# 标题条目的正文补全：列表页只有标题时，逐条请求详情页抽取正文段落。
+# 有界：每源每轮最多 _DETAIL_ENRICH_MAX 条、单条 12 秒超时、失败保持标题降级。
+_DETAIL_ENRICH_MAX = 5
+_DETAIL_ENRICH_TIMEOUT = 12.0
+_DETAIL_ENRICH_MIN_CHARS = 60
+
+
+def _extract_article_text(html_text: str) -> str:
+    cleaned = re.sub(r"<(script|style)[\s\S]*?</>", " ", html_text, flags=re.IGNORECASE)
+    paragraphs: list[str] = []
+    for match in re.finditer(r"<p[^>]*>([\s\S]*?)</p>", cleaned, re.IGNORECASE):
+        text = html.unescape(re.sub(r"<[^>]+>", "", match.group(1)))
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) >= 15:
+            paragraphs.append(text)
+    return " ".join(paragraphs)[:1500].strip()
+
+
+def _enrich_headline_items(session, source, items, raw_dir: Path):
+    """对 summary 为空的标题条目做单条详情页正文补全（有界、降级安全）。"""
+
+    if source.fetch_kind not in ("html_list", "rss"):
+        return items
+    enriched: list = []
+    fetched = 0
+    changed = False
+    for item in items:
+        url = str(item.url or "")
+        if (
+            str(item.summary or "").strip()
+            or fetched >= _DETAIL_ENRICH_MAX
+            or not url.startswith(("http://", "https://"))
+        ):
+            enriched.append(item)
+            continue
+        try:
+            response = session.get(
+                url, headers={"User-Agent": USER_AGENT}, timeout=_DETAIL_ENRICH_TIMEOUT
+            )
+            if response.status_code != 200:
+                enriched.append(item)
+                continue
+            page = response.text
+        except Exception:
+            enriched.append(item)
+            continue
+        fetched += 1
+        text = _extract_article_text(page)
+        title_norm = re.sub(r"\s+", "", item.title)
+        text_norm = re.sub(r"\s+", "", text)
+        if len(text_norm) < _DETAIL_ENRICH_MIN_CHARS or text_norm == title_norm:
+            enriched.append(item)
+            continue
+        try:
+            detail_dir = Path(raw_dir) / source.domain
+            detail_dir.mkdir(parents=True, exist_ok=True)
+            stamp = re.sub(r"[^0-9]", "", str(item.published_at or ""))[:8] or "nodate"
+            token = f"{abs(hash(url)) % 10**8:08d}"
+            (detail_dir / f"detail-{stamp}-{token}.html").write_text(
+                page, encoding="utf-8", errors="ignore"
+            )
+        except OSError:
+            pass
+        metadata = dict(item.metadata)
+        metadata["enriched_body"] = True
+        enriched.append(replace(item, summary=text))
+        changed = True
+    return tuple(enriched) if changed else items
 
 
 def fetch_enabled_news_sources(
@@ -185,6 +257,10 @@ def _fetch_one(
             error=str(exc)[:500],
         )
 
+    batch = replace(
+        batch,
+        items=_enrich_headline_items(session, source, batch.items, Path(raw_dir)),
+    )
     latest_item_at = max(
         (item.published_at for item in batch.items if item.published_at),
         default=None,
