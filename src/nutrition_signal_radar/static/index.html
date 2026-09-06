@@ -61,12 +61,18 @@
         <p>资讯线白名单的健康视图。启用变更走 CLI：<code>news set-source-enabled --name "XX" --enable</code>；首次启用必须人工确认，看板只读。</p>
       </div>
       <div class="surface table-wrap">
-        <div class="surface-title"><span>信源健康</span><span class="muted" id="newsSourceSummary"></span></div>
+        <div class="surface-title">
+          <span>信源健康</span>
+          <span>
+            <label class="switch-inline"><input type="checkbox" id="newsSourceEnabledOnly" checked> <span>只看启用</span></label>
+            <span class="muted" id="newsSourceSummary"></span>
+          </span>
+        </div>
         <table>
           <thead><tr><th>信源</th><th>类目</th><th>优先级</th><th>启用</th><th>健康</th><th>最后入库</th></tr></thead>
           <tbody id="newsSourceRows"></tbody>
         </table>
-        <p class="table-note">sync_health=error 表示最近一轮抓取失败（留审计事件，不影响其他源）；「从未」表示启用后还没有抓到过条目。</p>
+        <p class="table-note">sync_health=error 表示最近一轮抓取失败（留审计事件，不影响其他源）；「从未」表示启用后还没有抓到过条目。默认只看已启用源，取消勾选显示全部 36 个白名单。</p>
       </div>
     </section>
 

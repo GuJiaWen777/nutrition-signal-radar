@@ -405,3 +405,6 @@ button:disabled { cursor: wait; opacity: .6; }
   .research-form-actions { align-items: stretch; flex-direction: column; }
   .action-row { margin: 26px -20px -38px; padding: 13px 20px; }
 }
+
+.switch-inline { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; }
+.switch-inline input { accent-color: var(--teal-dark); }

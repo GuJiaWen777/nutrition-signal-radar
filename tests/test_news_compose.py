@@ -87,14 +87,30 @@ def _seed_four_selected_items(database_path: Path, *, base: datetime | None = No
     _enable_test_sources(database_path)
     feeds = {
         "https://www.example.gov.cn/feed.xml": [
-            ("市场监管总局就保健食品原料目录公开征求意见", "https://www.example.gov.cn/a/1", "保健食品原料目录征求意见，规范注册备案。"),
-            ("监管部门通报保健食品虚假宣传典型案例处罚结果", "https://www.example.gov.cn/a/2", "通报多起虚假宣传处罚，涉及保健食品宣传红线。"),
+            (
+                "市场监管总局就保健食品原料目录公开征求意见",
+                "https://www.example.gov.cn/a/1",
+                "保健食品原料目录调整公开征求意见，涉及新食品原料纳入条件与注册备案衔接安排，意见反馈期为三十天，行业企业可就目录调整提交书面建议。",
+            ),
+            (
+                "监管部门通报保健食品虚假宣传典型案例处罚结果",
+                "https://www.example.gov.cn/a/2",
+                "监管部门通报多起保健食品虚假宣传典型案例的处罚结果，涉事企业被处以罚款并责令整改，案例覆盖功能声称红线与老年消费场景，释放从严监管信号。",
+            ),
         ],
         "https://www.example-brand.com/feed.xml": [
-            ("汤臣倍健发布半年度财报业绩稳健增长", "https://www.example-brand.com/news/1", "公司披露半年度财报，营养健康业务稳健增长。"),
+            (
+                "汤臣倍健发布半年度财报业绩稳健增长",
+                "https://www.example-brand.com/news/1",
+                "公司披露半年度业绩报告，营业收入与净利润保持稳健增长，主因保健食品业务线上渠道扩张及新产品放量，报告期内研发投入同比继续提升。",
+            ),
         ],
         "https://www.example-expo.com/feed.xml": [
-            ("NHNE健康营养博览会今日开幕", "https://www.example-expo.com/news/1", "博览会开幕，保健食品与特医食品板块亮相。"),
+            (
+                "NHNE健康营养博览会今日开幕",
+                "https://www.example-expo.com/news/1",
+                "健康营养博览会今日开幕，保健食品、特医食品与营养健康品牌集中亮相，同期举办多场产业论坛与新品发布活动，主办方预计专业观众规模超过去年。",
+            ),
         ],
     }
     session = FakeSession()
@@ -214,7 +230,10 @@ def test_build_falls_back_to_weekly_and_skips_when_insufficient(tmp_path: Path) 
             title=title,
             published_at=(older - timedelta(hours=offset)).strftime("%Y-%m-%d %H:%M:%S"),
             url=link,
-            content_snapshot="保健食品监管动态与行业合规要求说明。",
+            content_snapshot=(
+                "保健食品监管动态与行业合规要求说明，现发布相关通知，"
+                "明确注册备案流程调整与功能声称管理要求，相关企业需在规定期限内完成自查。"
+            ),
             content_hash=None,
         )
         for offset, (title, link) in enumerate(
@@ -385,7 +404,10 @@ def _import_policy_articles(
             title=title,
             published_at=published.strftime("%Y-%m-%d %H:%M:%S"),
             url=link,
-            content_snapshot="保健食品监管动态与行业合规要求说明，现发布相关通知。",
+            content_snapshot=(
+                "保健食品监管动态与行业合规要求说明，现发布相关通知，"
+                "明确注册备案流程调整与功能声称管理要求，相关企业需在规定期限内完成自查。"
+            ),
             content_hash=None,
         )
         for index, (title, link, published) in enumerate(entries)
@@ -521,8 +543,8 @@ def test_over_limit_title_uses_model_rewrite_with_mechanical_fallback(
     )
     stamp = (NOW - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
     titles = [
-        "新京报：开店更快，北京食品经营许可新规一年惠及1.2万余家经营主体准入退出机制进一步完善并明确配套细则与办事指南",
-        "市场监管总局通报保健食品虚假宣传典型案例处罚结果",
+        "市场监管总局：北京食品经营许可新规实施一年惠及1.2万余家经营主体准入退出机制进一步完善并明确配套细则与办事指南",
+        "监管部门通报保健食品虚假宣传典型案例处罚结果",
         "中国营养学会发布膳食营养新研究共识",
     ]
     articles = tuple(
@@ -537,7 +559,10 @@ def test_over_limit_title_uses_model_rewrite_with_mechanical_fallback(
             ),
             title=title, published_at=stamp,
             url=f"https://www.example.gov.cn/a/{i}",
-            content_snapshot="保健食品监管新规正式发布，明确准入与退出机制。",
+            content_snapshot=(
+                "保健食品监管新规正式发布，明确准入与退出机制，"
+                "并同步更新标签标识与功能声称管理要求，行业企业需在过渡期内对照新规完成自查整改并提交报告。"
+            ),
             content_hash=None,
         )
         for i, title in enumerate(titles, start=1)
@@ -661,7 +686,10 @@ def _seed_selected_direct(
             title=title,
             published_at=published.strftime("%Y-%m-%d %H:%M:%S"),
             url=link,
-            content_snapshot="保健食品监管动态与行业合规要求说明。",
+            content_snapshot=(
+                "保健食品监管动态与行业合规要求说明，现发布相关通知，"
+                "明确注册备案流程调整与功能声称管理要求，相关企业需在规定期限内完成自查。"
+            ),
             content_hash=None,
         )
         for account, title, link, published in entries
@@ -930,23 +958,11 @@ def test_single_active_source_backfills_to_daily_floor(tmp_path: Path) -> None:
     assert "本期收录" not in html_text  # 导语块已移除
 
 
-def test_padding_summary_and_trivial_key_facts_are_rejected(tmp_path: Path) -> None:
-    """只有标题的条目：填充话术摘要被拒、碎片关键信息被滤，整条不足则跳过。"""
+def test_padding_summary_with_real_body_is_rejected(tmp_path: Path) -> None:
+    """正文真实但模型输出填充话术：摘要契约拒收，整条不足则跳过。"""
 
     database_path = tmp_path / "var" / "radar.sqlite3"
     _seed_four_selected_items(database_path)
-    # 直接把四条条目的正文压成标题同文，模拟「只有标题」的抓取结果
-    import sqlite3 as _sq
-
-    connection = _sq.connect(database_path)
-    connection.execute(
-        """
-        UPDATE source_articles SET content_snapshot = title
-        WHERE id IN (SELECT article_id FROM news_items WHERE selected = 1)
-        """
-    )
-    connection.commit()
-    connection.close()
 
     def padding_payload(prompt: str) -> str:
         return json.dumps(
@@ -961,14 +977,46 @@ def test_padding_summary_and_trivial_key_facts_are_rejected(tmp_path: Path) -> N
             }
         )
 
+    gateway = FakeComposeGateway(padding_payload)
     result = build_news_article(
         database_path,
-        FakeComposeGateway(padding_payload),
+        gateway,
         exports_dir=tmp_path / "var" / "exports" / "news-articles",
         now=NOW,
     )
     assert result.status == "skipped"
     assert "摘要契约" in result.detail
+    assert gateway.calls  # the model was consulted before exclusion
+
+
+def test_thin_snapshots_are_excluded_before_compose(tmp_path: Path) -> None:
+    """正文仅有标题（或不足 60 字）的条目：进入模型前就被硬闸剔除。"""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _seed_four_selected_items(database_path)
+    # 把四条条目的正文压成标题同文，模拟「只有标题」的历史存量抓取结果
+    import sqlite3 as _sq
+
+    connection = _sq.connect(database_path)
+    connection.execute(
+        """
+        UPDATE source_articles SET content_snapshot = title
+        WHERE id IN (SELECT article_id FROM news_items WHERE selected = 1)
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    gateway = FakeComposeGateway(lambda _prompt: _valid_payload())
+    result = build_news_article(
+        database_path,
+        gateway,
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        now=NOW,
+    )
+    assert result.status == "skipped"
+    assert "正文硬闸" in result.detail
+    assert not gateway.calls  # 薄料条目不该消耗任何模型调用
 
 
 def test_key_facts_filter_short_numeric_fragments(tmp_path: Path) -> None:
@@ -1063,3 +1111,112 @@ def test_fetch_enriches_headline_only_items_from_detail_page(tmp_path: Path) -> 
     finally:
         connection.close()
     assert "椰子水生产企业全覆盖风险排查" in snapshot
+
+
+def test_daily_backfills_from_week_window_up_to_cap(tmp_path: Path) -> None:
+    """当天 3 条且 7 日池还有未消耗条目时，补位到单篇上限，不满足 3 就停。"""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _enable_test_sources(database_path)
+    gov, brand, expo = "测试监管网", "测试品牌源", "测试展会源"
+    # 当天 3 条（不同源）
+    _seed_selected_direct(
+        database_path,
+        [
+            (gov, "市场监管总局就保健食品原料目录公开征求意见", "https://www.example.gov.cn/f/1", NOW - timedelta(hours=2)),
+            (brand, "汤臣倍健发布半年度财报业绩稳健增长", "https://www.example-brand.com/f/1", NOW - timedelta(hours=3)),
+            (expo, "NHNE健康营养博览会今日开幕", "https://www.example-expo.com/f/1", NOW - timedelta(hours=4)),
+        ],
+    )
+    # 4 天前还有 2 条未消耗（超出 24h 窗口、落在 7 日池）
+    older = NOW - timedelta(days=4)
+    _seed_selected_direct(
+        database_path,
+        [
+            (gov, "三部门联合开展保健食品行业清理整顿专项行动", "https://www.example.gov.cn/f/2", older - timedelta(hours=2)),
+            (brand, "东阿阿胶发布半年度财报营收稳步提升", "https://www.example-brand.com/f/2", older - timedelta(hours=3)),
+        ],
+    )
+    result = build_news_article(
+        database_path,
+        FakeComposeGateway(lambda _prompt: _valid_payload()),
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        now=NOW,
+    )
+    assert result.status == "built" and result.mode == "daily"
+    assert result.item_count == 5  # 3 当天 + 2 补位，触到上限
+
+
+def test_same_template_filings_merge_into_one_brief(tmp_path: Path) -> None:
+    """同源同日、同模板不同主体的备案公示合并成一条简讯，成员逐个记账。"""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _enable_test_sources(database_path)
+    gov, brand, expo = "测试监管网", "测试品牌源", "测试展会源"
+    _seed_selected_direct(
+        database_path,
+        [
+            (
+                gov,
+                "浙江省网络食品销售第三方平台提供者备案信息公示（宁波星享送餐饮管理有限公司）",
+                "https://www.example.gov.cn/m/1",
+                NOW - timedelta(hours=2),
+            ),
+            (
+                gov,
+                "浙江省网络食品销售第三方平台提供者备案信息公示（普康（杭州）健康科技有限公司）",
+                "https://www.example.gov.cn/m/2",
+                NOW - timedelta(hours=3),
+            ),
+            (brand, "汤臣倍健发布半年度财报业绩稳健增长", "https://www.example-brand.com/m/1", NOW - timedelta(hours=4)),
+            (expo, "NHNE健康营养博览会今日开幕", "https://www.example-expo.com/m/1", NOW - timedelta(hours=5)),
+        ],
+    )
+    result = build_news_article(
+        database_path,
+        FakeComposeGateway(lambda _prompt: _valid_payload()),
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        now=NOW,
+    )
+    assert result.status == "built" and result.mode == "daily"
+    assert result.item_count == 3  # 两条备案公示合成一条简讯
+    build_dir = Path(result.detail)
+    markdown = (build_dir / "news-article.md").read_text(encoding="utf-8")
+    assert "备案信息公示（2家企业）" in markdown
+    qc = json.loads((build_dir / "qc-log.json").read_text(encoding="utf-8"))
+    assert len(qc["merged_items"]) == 1
+    assert len(qc["merged_items"][0]["members"]) == 2
+
+    # 合并条目的每个成员都进入跨期排除账本，防止下期拆散重出
+    import sqlite3
+
+    connection = sqlite3.connect(database_path)
+    try:
+        links = connection.execute(
+            "SELECT COUNT(*) FROM news_article_items"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert links == 4
+
+
+def test_source_table_carries_summaries_for_selected_rows(tmp_path: Path) -> None:
+    """资讯源数据表的摘要列按 news_items.id 对号，入选行不再全空。"""
+
+    import csv
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _seed_four_selected_items(database_path)
+    result = build_news_article(
+        database_path,
+        FakeComposeGateway(lambda _prompt: _valid_payload()),
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        now=NOW,
+    )
+    assert result.status == "built"
+    with (Path(result.detail) / "source-table.csv").open(encoding="utf-8-sig") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows
+    for row in rows:
+        if row["是否入选"] == "是":
+            assert row["摘要"].startswith("本次监管动态"), row["标题"]

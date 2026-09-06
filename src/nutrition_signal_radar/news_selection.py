@@ -92,6 +92,20 @@ _FINANCE_TERMS = (
     "收购", "重组", "投资",
 )
 _EXPO_PREVIEW_TERMS = ("预告", "报名", "即将", "将办", "筹备")
+# 需求 P0 的定义是「国家政策、监管通报、法规征求意见、重大处罚」：
+# 省市局的常规备案公示不够格。国家级信源名或标题中的国家级机构名才享受 P0。
+_NATIONAL_POLICY_MARKERS: tuple[str, ...] = (
+    "市场监督管理总局", "市场监管总局", "国家卫生健康委", "国家卫健委", "海关总署",
+    "商务部", "国家药监局", "国家中医药局", "食品安全风险评估中心", "国务院",
+)
+# 例行登记类动作（备案/公示/注销）与实质性监管动作（处罚/征求意见/新规）：
+# 同为省市信源时按这两组词区分 P3 与 P1。
+_ROUTINE_FILING_TERMS = ("备案", "公示", "登记", "换证", "注销", "延续")
+_SUBSTANTIVE_POLICY_TERMS = (
+    "征求意见", "处罚", "罚没", "罚款", "吊销", "立案", "通报", "通告",
+    "抽检", "不合格", "召回", "飞行检查", "整治", "新规", "办法", "条例",
+    "规范", "标准", "目录", "许可", "修订", "实施", "施行",
+)
 _SOURCE_CATEGORY_SECTION = {
     "policy": "policy",
     "disclosure": "brand_finance",
@@ -259,6 +273,80 @@ def evaluate_pending_news_articles(database_path: Path) -> NewsSelectionReport:
     )
 
 
+def revalidate_selected_news_items(database_path: Path) -> dict[str, object]:
+    """按当前筛选规则重评已入选的 news_items 存量（规则收紧后的回溯清洗）。
+
+    只重放准入与栏目/优先级规则；近重复判定不重放（历史入选时的对比
+    上下文已不可复现），曾被拒的条目也从不复活——已拒条目保持原判，
+    只有当前仍为入选状态的条目可能被取消入选并记录新的拒绝原因。
+    """
+
+    initialize_schema(database_path)
+    connection = connect_database(database_path)
+    evaluated = unselected = priority_changed = section_changed = 0
+    unselected_by_reason: dict[str, int] = {}
+    try:
+        with transaction(connection):
+            rows = connection.execute(
+                """
+                SELECT ni.id AS row_id, ni.priority AS old_priority,
+                       ni.section AS old_section,
+                       sa.id AS article_id, sa.title, sa.url, sa.published_at,
+                       sa.content_snapshot,
+                       COALESCE(ns.id, ni.news_source_id) AS news_source_id,
+                       COALESCE(ns.name, ni.source_name) AS source_name,
+                       COALESCE(ns.category, ni.source_category) AS source_category
+                FROM news_items ni
+                JOIN source_articles sa ON sa.id = ni.article_id
+                LEFT JOIN news_sources ns ON ns.id = ni.news_source_id
+                WHERE ni.selected = 1
+                ORDER BY ni.id
+                """
+            ).fetchall()
+            no_prior = {"titles": [], "url_keys": set()}
+            for row in rows:
+                evaluated += 1
+                decision = _decide(row, no_prior)  # type: ignore[arg-type]
+                reasons = tuple(
+                    reason
+                    for reason in decision.rejection_reasons
+                    if reason["code"] not in ("duplicate_url", "duplicate_title")
+                )
+                selected = not reasons
+                unselected += int(not selected)
+                priority_changed += int(decision.priority != row["old_priority"])
+                section_changed += int(decision.section != row["old_section"])
+                for reason in reasons:
+                    code = reason["code"]
+                    unselected_by_reason[code] = unselected_by_reason.get(code, 0) + 1
+                connection.execute(
+                    """
+                    UPDATE news_items
+                    SET section = ?, priority = ?, selected = ?, decision = ?,
+                        rejection_reasons = ?, priority_reasons = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        decision.section,
+                        decision.priority,
+                        int(selected),
+                        "selected" if selected else "rejected",
+                        json.dumps(list(reasons), ensure_ascii=False),
+                        json.dumps(list(decision.priority_reasons), ensure_ascii=False),
+                        row["row_id"],
+                    ),
+                )
+    finally:
+        connection.close()
+    return {
+        "evaluated": evaluated,
+        "unselected": unselected,
+        "priority_changed": priority_changed,
+        "section_changed": section_changed,
+        "unselected_by_reason": unselected_by_reason,
+    }
+
+
 def list_news_items(database_path: Path, *, selected_only: bool = False) -> list[NewsItemDecision]:
     """Return recorded decisions, newest first; the daily source-table view."""
 
@@ -296,6 +384,7 @@ def _decide(row: sqlite3.Row, prior: dict[str, object]) -> NewsItemDecision:
     url = str(row["url"] or "").strip() or None
     published_at = str(row["published_at"] or "").strip() or None
     body = str(row["content_snapshot"] or "").strip()
+    source_name = str(row["source_name"] or "")
     haystack = f"{title} {body}"
 
     reasons: list[dict[str, str]] = []
@@ -339,7 +428,9 @@ def _decide(row: sqlite3.Row, prior: dict[str, object]) -> NewsItemDecision:
         reasons.append({"code": "no_action_info", "detail": "没有明确的政策动作、公司动作或会议信息"})
 
     section, section_reason = _classify_section(str(row["source_category"]), haystack)
-    priority, priority_reasons = _assess_priority(section, haystack)
+    priority, priority_reasons = _assess_priority(
+        section, haystack, source_name=source_name, title=title
+    )
 
     return NewsItemDecision(
         article_id=int(row["article_id"]),
@@ -375,11 +466,23 @@ def _classify_section(source_category: str, haystack: str) -> tuple[str, str]:
     return default, f"无栏目关键词命中，按信源类别默认归入（{_SECTION_LABELS[default]}）"
 
 
-def _assess_priority(section: str, haystack: str) -> tuple[str, list[str]]:
+def _assess_priority(
+    section: str,
+    haystack: str,
+    *,
+    source_name: str = "",
+    title: str = "",
+) -> tuple[str, list[str]]:
     """Apply the requirement document's P0–P3 content priority table."""
 
     if section == "policy":
-        return "P0", ["政策监管类内容按需求定为 P0"]
+        if _contains_any(f"{source_name} {title}", _NATIONAL_POLICY_MARKERS):
+            return "P0", ["国家层面政策监管内容按需求定为 P0"]
+        routine = _contains_any(haystack, _ROUTINE_FILING_TERMS)
+        substantive = _contains_any(haystack, _SUBSTANTIVE_POLICY_TERMS)
+        if routine and not substantive:
+            return "P3", ["省市常规备案/登记公示类内容按需求优先级表降为 P3"]
+        return "P1", ["省市实质性监管动作，介于国家 P0 与 P2 之间取 P1"]
     if section == "brand_finance":
         if _contains_any(haystack, _FINANCE_TERMS):
             return "P1", ["财报、融资并购等披露类动作按需求定为 P1"]
@@ -508,6 +611,7 @@ __all__ = [
     "is_same_news_event",
     "list_news_items",
     "normalize_news_title",
+    "revalidate_selected_news_items",
     "section_label",
     "url_identity_keys",
 ]

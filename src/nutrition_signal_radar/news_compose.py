@@ -52,6 +52,10 @@ _TITLE_REWRITE_SYSTEM_PROMPT = (
     '输出 JSON 对象：{"title": "改写后的标题"}。'
 )
 _MIN_ITEMS_FOR_DAILY = 3
+# 成文侧正文硬闸：快照去标签去空白后不足 60 字（与筛选层「已有真实正文」
+# 的 60 字标准一致）或正文与标题同文的条目，无法支撑 100-180 字摘要契约，
+# 在进入模型前剔除——「35 字进、150 字出」只会逼出复述式注水摘要。
+_SNAPSHOT_MIN_CHARS = 60
 _TARGET_ITEMS = 5
 _WEEKLY_LOOKBACK_DAYS = 7
 _SUMMARY_MIN_CHARS = 100
@@ -131,6 +135,8 @@ class ComposedItem:
     key_facts: tuple[dict[str, str], ...] = ()
     # news_items.id：跨期排除的关联键（article_id 是 source_articles.id，两者不同）。
     news_item_id: int = 0
+    # 合并条目带全部成员的 news_items.id（含单条情形），跨期排除逐成员记账。
+    news_item_ids: tuple[int, ...] = ()
     # 原文配图（og:image 或正文首图，取自原文 URL，微信编辑器粘贴时自动转存）。
     image_url: str = ""
 
@@ -202,6 +208,19 @@ def build_news_article(
             as_of=current_time,
         )
     )
+    # 先合并同模板公告、再过正文硬闸：两条「仅有标题」的同款备案公示
+    # 合并后即有可写素材，单条薄料则在此出局。
+    daily_items, daily_merges = _merge_routine_filings(daily_items)
+    weekly_items, weekly_merges = _merge_routine_filings(weekly_items)
+    daily_items, daily_thin = _filter_thin_inputs(daily_items)
+    weekly_items, weekly_thin = _filter_thin_inputs(weekly_items)
+    merged_records: list[dict[str, object]] = []
+    seen_merges: set[str] = set()
+    for record in (*daily_merges, *weekly_merges):
+        if str(record["title"]) in seen_merges:
+            continue
+        merged_records.append(record)
+        seen_merges.add(str(record["title"]))
     mode, items = _choose_item_pool(daily_items, weekly_items, max_items)
     slug = daily_slug if mode == "daily" else weekly_slug
     if mode == "skip" or len(items) < _MIN_ITEMS_TO_BUILD:
@@ -212,7 +231,10 @@ def build_news_article(
             mode="weekly" if mode == "skip" else mode,
             title="",
             item_count=len(items),
-            detail=f"去重后入选条目不足 {_MIN_ITEMS_TO_BUILD} 条，按需求不强行生成低价值文章",
+            detail=(
+                f"去重、合并与正文硬闸后入选条目不足 {_MIN_ITEMS_TO_BUILD} 条，"
+                "按需求不强行生成低价值文章"
+            ),
             files=(),
         )
 
@@ -227,11 +249,11 @@ def build_news_article(
             for item in composed
         ]
     seen_dupe_ids = {row["article_id"] for row in excluded}
-    for dupe in (*daily_dupes, *weekly_dupes):
-        if dupe["article_id"] in seen_dupe_ids:
+    for record in (*daily_dupes, *weekly_dupes, *daily_thin, *weekly_thin):
+        if record["article_id"] in seen_dupe_ids:
             continue
-        excluded.append(dupe)
-        seen_dupe_ids.add(dupe["article_id"])
+        excluded.append(record)
+        seen_dupe_ids.add(record["article_id"])
     if len(composed) < _MIN_ITEMS_TO_BUILD:
         return NewsBuildResult(
             status="skipped",
@@ -270,7 +292,10 @@ def build_news_article(
     )
     markdown = _render_markdown(article)
     html_text = _render_html(article)
-    qc = _quality_checks(mode, composed, excluded, markdown, insights=insights)
+    qc = _quality_checks(
+        mode, composed, excluded, markdown,
+        insights=insights, merged=merged_records,
+    )
 
     return _write_build(
         database_path,
@@ -295,6 +320,150 @@ def build_news_article(
 
 # ---------------------------------------------------------------------------
 # Candidate loading
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_PAREN_TITLE_RE = re.compile(r"^(.+?)[（(](.+)[）)]$")
+_ENTITY_MARKERS = ("公司", "集团", "厂", "中心", "协会", "研究院", "事务所")
+
+
+def _stripped_text(raw: str) -> str:
+    """Snapshot text reduced to comparable characters: no tags, entities, whitespace."""
+
+    return re.sub(r"\s+", "", html.unescape(_TAG_RE.sub(" ", str(raw or ""))))
+
+
+def _filing_base(title: str) -> tuple[str, str] | None:
+    """拆出「同一模板、括号内主体不同」的公告标题，返回 (模板, 主体)。
+
+    非贪婪模板 + 贪婪主体：公司名内部的括号（普康（杭州）健康科技）归主体。
+    """
+
+    cleaned = re.sub(r"^(【[^】]*】|\[[^\]]*\])\s*", "", str(title or "").strip())
+    match = _PAREN_TITLE_RE.match(cleaned)
+    if not match:
+        return None
+    base = match.group(1).strip()
+    inner = match.group(2).strip()
+    if len(base) < 8 or len(inner) < 2:
+        return None
+    return base, inner
+
+
+def _build_merged_item(members: list[dict[str, object]]) -> dict[str, object]:
+    """把同模板成员组装成一条简讯候选；成员快照拼接为新的正文快照。"""
+
+    first = members[0]
+    base, _ = _filing_base(str(first.get("title") or "")) or ("", "")
+    inners = [
+        (_filing_base(str(member.get("title") or "")) or ("", ""))[1]
+        for member in members
+    ]
+    entity_like = all(
+        any(marker in inner for marker in _ENTITY_MARKERS) for inner in inners
+    )
+    count_label = f"{len(members)}家企业" if entity_like else f"{len(members)}条同类信息"
+    snapshot_parts: list[str] = []
+    for member in members:
+        member_title = str(member.get("title") or "")
+        snapshot = _stripped_text(str(member.get("content_snapshot") or ""))
+        title_norm = re.sub(r"\s+", "", member_title)
+        if snapshot and snapshot != title_norm:
+            snapshot_parts.append(
+                f"标题：{member_title}\n正文或摘要：{member.get('content_snapshot')}"
+            )
+        else:
+            snapshot_parts.append(f"标题：{member_title}")
+    rank = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+    priority = min(
+        (str(member.get("priority") or "P3") for member in members),
+        key=lambda value: rank.get(value, 9),
+    )
+    return {
+        "article_id": first["article_id"],
+        "news_item_id": first.get("news_item_id", 0),
+        "member_news_item_ids": tuple(
+            int(member.get("news_item_id") or 0) for member in members
+        ),
+        "title": f"{base}（{count_label}）",
+        "url": str(first.get("url") or "").strip() or None,
+        "published_at": str(first.get("published_at") or "").strip() or None,
+        "source_name": str(first.get("source_name") or ""),
+        "section": str(first.get("section") or ""),
+        "priority": priority,
+        "content_snapshot": "\n".join(snapshot_parts),
+    }
+
+
+def _merge_routine_filings(
+    items: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """同源同日、去括号后同模板的公告合并为一条简讯，返回 (新列表, 合并记录)。
+
+    典型场景：同一天对 N 家企业的同款备案公示各占一条，读者只需一条
+    「…备案信息公示（N 家企业）」。合并是确定性文本操作，公司名逐字
+    来自原标题，不引入新事实。
+    """
+
+    groups: dict[tuple[str, str, str], list[dict[str, object]]] = {}
+    order: list[tuple[str, str, str]] = []
+    merged: list[dict[str, object]] = []
+    for item in items:
+        parsed = _filing_base(str(item.get("title") or ""))
+        if parsed is None:
+            merged.append(item)
+            continue
+        base, _inner = parsed
+        key = (
+            str(item.get("source_name") or ""),
+            str(item.get("published_at") or "")[:10],
+            re.sub(r"\s+", "", base),
+        )
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(item)
+    records: list[dict[str, object]] = []
+    for key in order:
+        members = sorted(groups[key], key=lambda member: str(member.get("title") or ""))
+        if len(members) < 2:
+            merged.extend(members)
+            continue
+        merged_item = _build_merged_item(members)
+        merged.append(merged_item)
+        records.append(
+            {
+                "title": str(merged_item["title"]),
+                "members": [str(member.get("title") or "") for member in members],
+            }
+        )
+    return merged, records
+
+
+def _filter_thin_inputs(
+    items: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, str]]]:
+    """剔除正文快照撑不起摘要契约的条目，返回 (保留列表, 排除记录)。"""
+
+    kept: list[dict[str, object]] = []
+    excluded: list[dict[str, str]] = []
+    for item in items:
+        snapshot = _stripped_text(str(item.get("content_snapshot") or ""))
+        title_norm = re.sub(r"\s+", "", str(item.get("title") or ""))
+        if len(snapshot) < _SNAPSHOT_MIN_CHARS or snapshot == title_norm:
+            excluded.append(
+                {
+                    "article_id": str(item["article_id"]),
+                    "title": str(item["title"]),
+                    "reason": (
+                        f"thin_input：正文快照去标签后不足 {_SNAPSHOT_MIN_CHARS} 字"
+                        "或仅有标题，无法支撑摘要契约"
+                    ),
+                }
+            )
+            continue
+        kept.append(item)
+    return kept, excluded
 
 
 _LEAD_IMAGE_TIMEOUT_SECONDS = 12.0
@@ -443,10 +612,12 @@ def _choose_item_pool(
     weekly_items: list[dict[str, object]],
     max_items: int,
 ) -> tuple[str, list[dict[str, object]]]:
-    """Pick daily vs weekly pool: backfill today's thin set from the 7-day window."""
+    """Pick daily vs weekly pool.
 
-    if len(daily_items) >= _MIN_ITEMS_FOR_DAILY:
-        return "daily", _cap_per_source(_sort_news_items(daily_items), max_items)
+    当天有已入选条目（1–4 条）时，一律从 7 日池按 P0→P3 补位到单篇上限：
+    读者看到的是尽量接近 3–5 条的日报，而不是当天恰好 3 条就停。
+    """
+
     if daily_items:
         filled = _backfill_daily(daily_items, weekly_items, max_items)
         if len(filled) >= _MIN_ITEMS_FOR_DAILY:
@@ -578,6 +749,16 @@ def _summarize(
             and len(fact["value"].strip()) >= 4
             and any(ch not in "0123456789.,%年月日" for ch in fact["value"].strip())
         )
+        member_ids = tuple(
+            dict.fromkeys(
+                value
+                for value in (
+                    int(item.get("news_item_id") or 0),
+                    *(int(member) for member in item.get("member_news_item_ids") or ()),
+                )
+                if value > 0
+            )
+        )
         return ComposedItem(
             article_id=int(item["article_id"]),
             source_name=str(item["source_name"]),
@@ -592,6 +773,7 @@ def _summarize(
             keywords=keywords,
             key_facts=verified_facts,
             news_item_id=int(item.get("news_item_id") or 0),
+            news_item_ids=member_ids,
         )
     return None
 
@@ -1040,7 +1222,10 @@ def _quality_checks(
     excluded: list[dict[str, str]],
     markdown: str,
     insights: tuple[str, ...] = (),
+    merged: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
+    merged = merged or []
+    merged_member_count = sum(len(record["members"]) for record in merged)  # type: ignore[arg-type]
     text_length = len(re.sub(r"[#>*\[\]()|！？\s-]", "", markdown))
     item_checks = [
         {
@@ -1071,11 +1256,18 @@ def _quality_checks(
          "detail": f"关键信息 {sum(len(item.key_facts) for item in composed)} 条（已在抽取时经原文子串校验）"},
         {"check": "insights_count", "passed": True,
          "detail": f"本期速览 {len(insights)} 条（仅基于本期条目）"},
+        {"check": "routine_merge",
+         "passed": True,
+         "detail": (
+             f"同模板公告合并 {len(merged)} 组"
+             f"（覆盖 {merged_member_count} 条原条目）"
+         )},
     ]
     return {
         "item_checks": item_checks,
         "article_checks": article_checks,
         "excluded_items": excluded,
+        "merged_items": merged,
         "all_passed": all(check["passed"] for check in article_checks),
     }
 
@@ -1185,15 +1377,19 @@ def _write_build(
                 "%Y-%m-%dT%H:%M:%S.%fZ"
             )
             for item in composed:
-                if item.news_item_id <= 0:
-                    continue
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO news_article_items(article_id, news_item_id, created_at)
-                    VALUES (?, ?, ?)
-                    """,
-                    (article_row_id, item.news_item_id, consumed_at),
+                # 合并条目按全部成员记账：任何一个成员被本期消耗后，
+                # 跨期排除都要认账，防止同款公告下期拆散重出。
+                member_ids = item.news_item_ids or (
+                    (item.news_item_id,) if item.news_item_id > 0 else ()
                 )
+                for member_id in member_ids:
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO news_article_items(article_id, news_item_id, created_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (article_row_id, member_id, consumed_at),
+                    )
     finally:
         connection.close()
     return NewsBuildResult(
@@ -1294,7 +1490,15 @@ def _write_source_table(
 ) -> None:
     """Export the requirement document's daily source table for this build."""
 
-    summaries = {item.article_id: item.summary for item in composed}
+    # 摘要按 news_items.id 对号（source-table 行主键是 ni.id，不是 article_id）：
+    # 合并条目把同一条简讯摘要写到它的每个成员行上。
+    summaries: dict[int, str] = {}
+    for item in composed:
+        member_ids = item.news_item_ids or (
+            (item.news_item_id,) if item.news_item_id > 0 else ()
+        )
+        for member_id in member_ids:
+            summaries[member_id] = item.summary
     initialize_schema(database_path)
     connection = connect_database(database_path, readonly=True)
     try:

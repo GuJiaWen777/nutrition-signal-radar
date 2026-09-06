@@ -186,6 +186,7 @@ async function loadNews() {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     state.news = await response.json();
     state.newsLoaded = true;
+    document.querySelector("#newsSourceEnabledOnly").addEventListener("change", renderNewsSources);
     renderNewsSources();
     renderNewsItems();
     renderNewsArticles();
@@ -198,9 +199,11 @@ const NEWS_CATEGORY = { policy: "政策", disclosure: "披露", brand: "品牌",
 
 function renderNewsSources() {
   const sources = state.news.sources || [];
-  document.querySelector("#newsSourceSummary").textContent = `白名单 ${sources.length} 个 / 已启用 ${state.news.enabled_count}`;
-  document.querySelector("#newsSourceRows").innerHTML = sources.length
-    ? sources.map((source) => `
+  const enabledOnly = document.querySelector("#newsSourceEnabledOnly").checked;
+  const visible = enabledOnly ? sources.filter((source) => source.enabled) : sources;
+  document.querySelector("#newsSourceSummary").textContent = `白名单 ${sources.length} 个 / 已启用 ${state.news.enabled_count} / 当前显示 ${visible.length}`;
+  document.querySelector("#newsSourceRows").innerHTML = visible.length
+    ? visible.map((source) => `
       <tr>
         <td><strong>${escapeHtml(source.name)}</strong></td>
         <td>${escapeHtml(NEWS_CATEGORY[source.category] || source.category)}</td>

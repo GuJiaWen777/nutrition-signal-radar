@@ -359,7 +359,8 @@ def test_policy_sources_count_bare_food_terms_as_relevant(tmp_path: Path) -> Non
     assert report.selected == 1
     item = list_news_items(database_path, selected_only=True)[0]
     assert item.section == "policy"
-    assert item.priority == "P0"
+    # 省市级「监管部门」的实质性检查动作：P0 只留给国家级，此处 P1
+    assert item.priority == "P1"
 
 
 def test_expo_source_counts_exhibition_terms_as_relevant(tmp_path: Path) -> None:
@@ -493,3 +494,153 @@ def test_rejected_missing_body_items_reopen_after_body_enrichment(tmp_path: Path
     second = evaluate_pending_news_articles(database_path)
     assert second.evaluated == 1  # 重开并重新评估
     assert second.selected == 1
+
+
+def test_policy_priority_splits_national_substantive_and_routine(tmp_path: Path) -> None:
+    """需求 P0 只给国家级；省市实质性监管 P1，常规备案公示 P3。"""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+    _enable(
+        database_path,
+        name="浙江省市场监督管理局",
+        domain="zjamr.zj.gov.cn",
+        category="policy",
+        entry_url="https://www.zjamr.zj.gov.cn/feed.xml",
+        fetch_kind="rss",
+        default_priority="P0",
+    )
+    recent = (NOW - timedelta(hours=1)).astimezone(CST)
+    feed = f"""<?xml version="1.0"?>
+    <rss version="2.0"><channel><title>t</title>
+      <item><title>浙江省网络食品销售第三方平台提供者备案信息公示（宁波星享送餐饮管理有限公司）</title>
+        <link>https://www.zjamr.zj.gov.cn/a/1</link>
+        <pubDate>Mon, {recent:%d %b %Y} 08:00:00 +0800</pubDate>
+        <description>浙江省市场监督管理局公示网络食品销售第三方平台备案信息，含企业名称与备案编号。</description></item>
+      <item><title>浙江省市场监督管理局食品安全监督抽检信息通告（2026年第27期）</title>
+        <link>https://www.zjamr.zj.gov.cn/a/2</link>
+        <pubDate>Mon, {recent:%d %b %Y} 08:30:00 +0800</pubDate>
+        <description>本期通告覆盖保健食品与网络食品销售抽检结果，不合格样品已移交属地处置。</description></item>
+      <item><title>国家市场监督管理总局就保健食品原料目录公开征求意见</title>
+        <link>https://www.zjamr.zj.gov.cn/a/3</link>
+        <pubDate>Mon, {recent:%d %b %Y} 09:00:00 +0800</pubDate>
+        <description>国家市场监督管理总局就保健食品原料目录调整公开征求意见，反馈期三十天。</description></item>
+    </channel></rss>"""
+    _ingest_rss(database_path, feed, entry_url="https://www.zjamr.zj.gov.cn/feed.xml", name="浙江省市场监督管理局")
+
+    report = evaluate_pending_news_articles(database_path)
+    assert report.selected == 3
+
+    items = {item.title: item for item in list_news_items(database_path)}
+    routine_filing = items["浙江省网络食品销售第三方平台提供者备案信息公示（宁波星享送餐饮管理有限公司）"]
+    sampling_notice = items["浙江省市场监督管理局食品安全监督抽检信息通告（2026年第27期）"]
+    national = items["国家市场监督管理总局就保健食品原料目录公开征求意见"]
+    assert routine_filing.priority == "P3"
+    assert sampling_notice.priority == "P1"
+    assert national.priority == "P0"
+    assert all(item.section == "policy" for item in (routine_filing, sampling_notice, national))
+
+
+def test_revalidate_unselects_thin_legacy_items(tmp_path: Path) -> None:
+    """规则收紧后的回溯清洗：已入选的「仅有标题」条目被取消，已拒条目不复活。"""
+
+    from nutrition_signal_radar.news_selection import revalidate_selected_news_items
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+    _enable(
+        database_path,
+        name="测试监管网",
+        domain="example.gov.cn",
+        category="policy",
+        entry_url="https://www.example.gov.cn/feed.xml",
+        fetch_kind="rss",
+        default_priority="P0",
+    )
+    recent = (NOW - timedelta(hours=1)).astimezone(CST)
+    feed = f"""<?xml version="1.0"?>
+    <rss version="2.0"><channel><title>t</title>
+      <item><title>市场监管总局就保健食品原料目录公开征求意见</title>
+        <link>https://www.example.gov.cn/a/1</link>
+        <pubDate>Mon, {recent:%d %b %Y} 08:00:00 +0800</pubDate>
+        <description>保健食品原料目录调整公开征求意见，涉及新食品原料纳入路径与注册备案衔接要求。</description></item>
+      <item><title>某地举办蔬菜种植技术培训的通知</title>
+        <link>https://www.example.gov.cn/a/2</link>
+        <pubDate>Mon, {recent:%d %b %Y} 08:10:00 +0800</pubDate>
+        <description>面向种植户的农技推广活动安排。</description></item>
+    </channel></rss>"""
+    _ingest_rss(database_path, feed, entry_url="https://www.example.gov.cn/feed.xml", name="测试监管网")
+    report = evaluate_pending_news_articles(database_path)
+    assert report.selected == 1
+    assert report.rejected == 1
+
+    # 模拟历史存量：入选条目当时有正文，如今快照退化为「仅有标题」
+    import sqlite3
+
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        """
+        UPDATE source_articles SET content_snapshot = title
+        WHERE id IN (SELECT article_id FROM news_items WHERE selected = 1)
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    stats = revalidate_selected_news_items(database_path)
+    assert stats["evaluated"] == 1
+    assert stats["unselected"] == 1
+    assert stats["unselected_by_reason"]["missing_body"] == 1
+
+    items = {item.title: item for item in list_news_items(database_path)}
+    assert items["市场监管总局就保健食品原料目录公开征求意见"].selected is False
+    # 曾因 not_relevant 被拒的条目不会被回溯清洗复活
+    assert items["某地举办蔬菜种植技术培训的通知"].selected is False
+
+
+def test_news_cli_revalidate_reports_cleanup(tmp_path: Path, capsys) -> None:
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+    _enable(
+        database_path,
+        name="测试监管网",
+        domain="example.gov.cn",
+        category="policy",
+        entry_url="https://www.example.gov.cn/feed.xml",
+        fetch_kind="rss",
+        default_priority="P0",
+    )
+    recent = (NOW - timedelta(hours=1)).astimezone(CST)
+    feed = f"""<?xml version="1.0"?>
+    <rss version="2.0"><channel><title>t</title>
+      <item><title>市场监管总局发布保健食品备案管理新规</title>
+        <link>https://www.example.gov.cn/a/7</link>
+        <pubDate>Mon, {recent:%d %b %Y} 08:00:00 +0800</pubDate>
+        <description>保健食品备案管理新规正式发布，明确注册流程与标签要求。</description></item>
+    </channel></rss>"""
+    _ingest_rss(database_path, feed, entry_url="https://www.example.gov.cn/feed.xml", name="测试监管网")
+
+    select_code = main(["--project-root", str(tmp_path), "news", "select", "--json"])
+    assert select_code == 0
+    assert json.loads(capsys.readouterr().out)["selected"] == 1
+
+    import sqlite3
+
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "UPDATE source_articles SET content_snapshot = title"
+    )
+    connection.commit()
+    connection.close()
+
+    revalidate_code = main(["--project-root", str(tmp_path), "news", "revalidate"])
+    output = capsys.readouterr().out
+    assert revalidate_code == 0
+    assert "1 selected items re-checked" in output
+    assert "1 unselected" in output
+    assert "missing_body" in output
+
+    json_code = main(["--project-root", str(tmp_path), "news", "revalidate", "--json"])
+    assert json_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["evaluated"] == 0  # 清洗后无已入选条目，二次运行为空

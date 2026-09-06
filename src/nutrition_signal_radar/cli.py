@@ -42,6 +42,7 @@ from .news_registry import (
 from .news_selection import (
     evaluate_pending_news_articles,
     list_news_items,
+    revalidate_selected_news_items,
 )
 from .redfox_gateway import (
     DEFAULT_REDFOX_ACCOUNT_NAMES,
@@ -401,6 +402,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Apply deterministic admission rules to fetched news articles (no network, no LLM).",
     )
     news_select.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    news_revalidate = news_commands.add_parser(
+        "revalidate",
+        help=(
+            "Re-apply current selection rules to previously selected items "
+            "(retroactive cleanup after rule tightening; no network, no LLM)."
+        ),
+    )
+    news_revalidate.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     news_items = news_commands.add_parser(
         "list-items",
         help="List recorded news-item decisions (the daily source-table view).",
@@ -1006,6 +1015,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                         print(f"  rejected[{reason_code}]: {count}")
                     for section, count in sorted(report.selected_by_section.items()):
                         print(f"  selected[{section}]: {count}")
+                return 0
+
+            if args.news_command == "revalidate":
+                stats = revalidate_selected_news_items(settings.database_path)
+                if args.json:
+                    print(json.dumps(stats, ensure_ascii=False, indent=2))
+                else:
+                    print(
+                        f"News revalidation completed: {stats['evaluated']} selected items re-checked; "
+                        f"{stats['unselected']} unselected; "
+                        f"{stats['priority_changed']} priority changes; "
+                        f"{stats['section_changed']} section changes"
+                    )
+                    for reason_code, count in sorted(
+                        stats["unselected_by_reason"].items(), key=lambda item: -item[1]
+                    ):
+                        print(f"  unselected[{reason_code}]: {count}")
                 return 0
 
             if args.news_command == "list-items":

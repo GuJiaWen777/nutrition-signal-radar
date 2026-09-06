@@ -1003,6 +1003,10 @@ def test_news_tab_front_end_contract() -> None:
     assert index.index('data-tab="news-sources"') < index.index('data-tab="signals"')
     # 信源表与资讯线懒加载：两个标签都要能触发数据加载
     assert '(tabId === "news" || tabId === "news-sources")' in script
+    # 只看启用过滤开关：默认勾选，取消后重渲染全量
+    assert 'id="newsSourceEnabledOnly"' in index
+    assert 'newsSourceEnabledOnly' in script
+    assert 'sources.filter((source) => source.enabled)' in script
     assert "async function loadNews" in script
     assert "renderNewsSources" in script
     assert "renderNewsItems" in script
