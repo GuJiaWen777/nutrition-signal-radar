@@ -24,7 +24,11 @@ from .cycle_service import (
 from .database import connect_database
 from .demo_pipeline import DEMO_GENERATOR
 from .news_compose import preview_news_readiness
-from .news_registry import list_news_sources
+from .news_registry import (
+    list_news_sources,
+    news_fetch_freshness,
+    news_source_yield,
+)
 from .redfox_gateway import RedFoxGateway, RedFoxGatewayError
 from .research_workflow import (
     OnlineResearchRunner,
@@ -1043,6 +1047,7 @@ def _news_payload(
 
     connection = connect_database(database_path, readonly=True)
     try:
+        yields = news_source_yield(database_path, now=now)
         sources = []
         for source in sorted(
             list_news_sources(database_path),
@@ -1059,6 +1064,9 @@ def _news_payload(
                     "last_fetched_at": source.last_fetched_at,
                     "last_item_at": source.last_item_at,
                     "entry_url": source.entry_url,
+                    "yield_30d": yields.get(
+                        source.id, {"evaluated": 0, "selected": 0}
+                    ),
                 }
             )
 
@@ -1184,6 +1192,7 @@ def _news_payload(
         "articles": articles,
         "item_days": item_days,
         "readiness": readiness,
+        "fetch_freshness": news_fetch_freshness(database_path, now=now),
     }
 
 

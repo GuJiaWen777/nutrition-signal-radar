@@ -1701,6 +1701,99 @@ def load_news_article_build(database_path: Path, *, slug: str, version: int) -> 
     }
 
 
+_DIFF_FIELDS = ("display_title", "title", "summary", "implication", "url")
+
+
+def diff_news_builds(
+    database_path: Path,
+    *,
+    slug: str,
+    from_version: int,
+    to_version: int,
+) -> dict[str, object]:
+    """Compare two builds of the same slug by manifest item identity.
+
+    Read-only: helps an operator decide which version to push after a same-day
+    fix (v001 vs v002) without rebuilding or calling the model.
+    """
+
+    before = load_news_article_build(
+        database_path, slug=slug, version=from_version
+    )
+    after = load_news_article_build(database_path, slug=slug, version=to_version)
+
+    def _manifest(info: dict[str, object]) -> tuple[dict[str, dict], str]:
+        path = Path(str(info["build_dir"])) / "manifest.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        items = {
+            str(item.get("article_id")): item
+            for item in payload.get("items", [])
+            if isinstance(item, dict)
+        }
+        return items, str(payload.get("title") or info.get("title") or "")
+
+    before_items, before_title = _manifest(before)
+    after_items, after_title = _manifest(after)
+
+    def _label(item: dict) -> str:
+        return str(item.get("display_title") or item.get("title") or "")
+
+    def _brief(item: dict) -> dict[str, object]:
+        return {
+            "article_id": str(item.get("article_id") or ""),
+            "title": _label(item),
+            "source_name": str(item.get("source_name") or ""),
+            "priority": str(item.get("priority") or ""),
+        }
+
+    added = [
+        _brief(after_items[key])
+        for key in after_items
+        if key not in before_items
+    ]
+    removed = [
+        _brief(before_items[key])
+        for key in before_items
+        if key not in after_items
+    ]
+    changed: list[dict[str, object]] = []
+    for key in before_items:
+        if key not in after_items:
+            continue
+        old, new = before_items[key], after_items[key]
+        fields = [
+            field
+            for field in _DIFF_FIELDS
+            if str(old.get(field) or "") != str(new.get(field) or "")
+        ]
+        if not fields:
+            continue
+        changed.append(
+            {
+                **_brief(new),
+                "fields": fields,
+                "before": {field: str(old.get(field) or "") for field in fields},
+                "after": {field: str(new.get(field) or "") for field in fields},
+            }
+        )
+    return {
+        "slug": slug,
+        "from_version": from_version,
+        "to_version": to_version,
+        "title_changed": before_title != after_title,
+        "before_title": before_title,
+        "after_title": after_title,
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "counts": {
+            "added": len(added),
+            "removed": len(removed),
+            "changed": len(changed),
+        },
+    }
+
+
 def news_publish_blockers(build_dir: Path) -> list[str]:
     """Return hard QC failures that must stop a WeChat draft push.
 
@@ -1840,6 +1933,7 @@ __all__ = [
     "NewsBuildResult",
     "NewsComposeError",
     "build_news_article",
+    "diff_news_builds",
     "news_publish_blockers",
     "preview_news_build",
     "preview_news_readiness",

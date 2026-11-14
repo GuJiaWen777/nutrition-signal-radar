@@ -188,6 +188,7 @@ async function loadNews() {
     state.newsLoaded = true;
     document.querySelector("#newsSourceEnabledOnly").addEventListener("change", renderNewsSources);
     renderNewsReadiness();
+    renderNewsFreshness();
     renderNewsSources();
     renderNewsItems();
     renderNewsArticles();
@@ -221,23 +222,47 @@ function renderNewsReadiness() {
   stats.textContent = `24h 可用 ${daily.available ?? 0} 条 / 7 日可用 ${weekly.available ?? 0} 条 / 计划 ${readiness.item_count ?? 0} 条（目标 ${readiness.target_min ?? 0}–${readiness.target_max ?? 0}）`;
 }
 
+function renderNewsFreshness() {
+  const freshness = state.news.fetch_freshness || {};
+  const target = document.querySelector("#newsFetchFreshness");
+  if (!freshness || freshness.state === "not_initialized") {
+    target.textContent = "";
+    return;
+  }
+  if (freshness.state === "no_sources") {
+    target.innerHTML = '<span class="badge">暂无启用信源</span>';
+    return;
+  }
+  const age = freshness.age_hours;
+  const ageText = age === null || age === undefined ? "从未抓取" : `${age} 小时前`;
+  if (freshness.stale) {
+    target.innerHTML = `<span class="badge watch">抓取停摆</span> 最近抓取：${escapeHtml(ageText)}（阈值 ${freshness.stale_hours}h）；请检查任务计划程序。`;
+  } else {
+    target.textContent = `最近抓取：${ageText}`;
+  }
+}
+
 function renderNewsSources() {
   const sources = state.news.sources || [];
   const enabledOnly = document.querySelector("#newsSourceEnabledOnly").checked;
   const visible = enabledOnly ? sources.filter((source) => source.enabled) : sources;
   document.querySelector("#newsSourceSummary").textContent = `白名单 ${sources.length} 个 / 已启用 ${state.news.enabled_count} / 当前显示 ${visible.length}`;
   document.querySelector("#newsSourceRows").innerHTML = visible.length
-    ? visible.map((source) => `
+    ? visible.map((source) => {
+      const stats = source.yield_30d || { selected: 0, evaluated: 0 };
+      return `
       <tr>
         <td><strong>${escapeHtml(source.name)}</strong></td>
         <td>${escapeHtml(NEWS_CATEGORY[source.category] || source.category)}</td>
         <td>${escapeHtml(source.priority)}</td>
         <td><span class="badge ${source.enabled ? "teal" : ""}">${source.enabled ? "已启用" : "停用"}</span></td>
         <td>${escapeHtml(source.sync_health || "—")}</td>
+        <td>${number(stats.selected)}/${number(stats.evaluated)}</td>
         <td>${source.last_item_at ? formatDate(source.last_item_at) : '<span class="muted">从未</span>'}</td>
       </tr>
-    `).join("")
-    : '<tr><td colspan="6" class="empty-cell">尚未导入白名单；CLI 运行 news seed-sources。</td></tr>';
+    `;
+    }).join("")
+    : '<tr><td colspan="7" class="empty-cell">尚未导入白名单；CLI 运行 news seed-sources。</td></tr>';
 }
 
 function renderNewsItems() {

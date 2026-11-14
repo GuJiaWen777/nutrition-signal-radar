@@ -26,6 +26,7 @@ from .llm_gateway import LlmGateway, LlmGatewayError
 from .news_compose import (
     NewsComposeError,
     build_news_article,
+    diff_news_builds,
     load_news_article_build,
     mark_news_article_pushed,
     news_publish_blockers,
@@ -38,7 +39,9 @@ from .news_registry import (
     configure_news_source,
     list_enabled_news_sources,
     list_news_sources,
+    news_fetch_freshness,
     news_source_seed_count,
+    news_source_yield,
     seed_news_sources,
     set_news_source_enabled,
 )
@@ -461,6 +464,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     news_qc.add_argument("--slug", required=True, help="Built article slug, e.g. news-2026-09-01.")
     news_qc.add_argument("--version", type=int, required=True, help="Built article version number.")
     news_qc.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    news_diff = news_commands.add_parser(
+        "diff",
+        help="Compare two versions of one build by manifest items (read-only).",
+    )
+    news_diff.add_argument("--slug", required=True, help="Built article slug.")
+    news_diff.add_argument(
+        "--from", dest="from_version", type=int, required=True,
+        help="Older version number.",
+    )
+    news_diff.add_argument(
+        "--to", dest="to_version", type=int, required=True,
+        help="Newer version number.",
+    )
+    news_diff.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     news_publish = news_commands.add_parser(
         "publish",
         help="Push one built news article into the WeChat draft box (requires --live and credentials).",
@@ -920,10 +937,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.news_command == "list-sources":
                 sources = [source.as_dict() for source in list_news_sources(settings.database_path)]
                 enabled_count = len(list_enabled_news_sources(settings.database_path))
+                yields = news_source_yield(settings.database_path)
+                for source in sources:
+                    stats = yields.get(int(source["id"]), {})
+                    source["yield_30d"] = {
+                        "evaluated": stats.get("evaluated", 0),
+                        "selected": stats.get("selected", 0),
+                    }
                 payload = {
                     "sources": sources,
                     "source_count": len(sources),
                     "enabled_count": enabled_count,
+                    "fetch_freshness": news_fetch_freshness(settings.database_path),
                 }
                 if args.json:
                     print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -931,11 +956,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if not sources:
                         print("No news-whitelist sources are configured yet.")
                     for source in sources:
+                        stats = source["yield_30d"]
                         print(
                             f"- {source['name']} ({source['category']}): "
                             f"{'enabled' if source['enabled'] else 'disabled'}; "
                             f"{source['default_priority']}; {source['fetch_kind']}; "
+                            f"30d 入选 {stats['selected']}/{stats['evaluated']}; "
                             f"{source['entry_url']}"
+                        )
+                    freshness = payload["fetch_freshness"]
+                    if freshness["stale"]:
+                        age = freshness["age_hours"]
+                        age_text = f"{age}h" if age is not None else "从未抓取"
+                        print(
+                            f"WARNING: 资讯抓取已停摆（最近 {age_text}，"
+                            f"阈值 {freshness['stale_hours']}h）；请检查任务计划程序。"
                         )
                     print(f"News whitelist: {len(sources)} total; {enabled_count} enabled.")
                 return 0
@@ -1246,6 +1281,47 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else:
                         print("发布门禁：通过（total_length 仅为软提示）")
                 return 0 if payload["all_passed"] else 1
+
+            if args.news_command == "diff":
+                try:
+                    payload = diff_news_builds(
+                        settings.database_path,
+                        slug=args.slug,
+                        from_version=args.from_version,
+                        to_version=args.to_version,
+                    )
+                except (NewsComposeError, OSError, ValueError) as exc:
+                    print(f"News diff failed: {exc}", file=sys.stderr)
+                    return 1
+                if args.json:
+                    print(json.dumps(payload, ensure_ascii=False, indent=2))
+                else:
+                    counts = payload["counts"]
+                    print(
+                        f"Diff {payload['slug']} "
+                        f"v{args.from_version:03d} → v{args.to_version:03d}: "
+                        f"+{counts['added']} -{counts['removed']} ~{counts['changed']}"
+                    )
+                    if payload["title_changed"]:
+                        print(
+                            f"  标题：{payload['before_title']} → {payload['after_title']}"
+                        )
+                    for item in payload["added"]:
+                        print(
+                            f"  + [{item['priority']}] {item['title']}"
+                            f"（{item['source_name']}）"
+                        )
+                    for item in payload["removed"]:
+                        print(
+                            f"  - [{item['priority']}] {item['title']}"
+                            f"（{item['source_name']}）"
+                        )
+                    for item in payload["changed"]:
+                        print(
+                            f"  ~ [{item['priority']}] {item['title']}: "
+                            + "、".join(item["fields"])
+                        )
+                return 0
 
             if args.news_command == "serve":
                 run_news_reader_server(

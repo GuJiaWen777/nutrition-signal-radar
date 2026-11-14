@@ -963,6 +963,8 @@ def test_news_tab_api_serves_sources_items_and_article_list(tmp_path: Path) -> N
         assert readiness["ready"] is True
         assert readiness["mode"] == "daily"
         assert readiness["item_count"] == 3
+        assert payload["fetch_freshness"]["stale"] is True  # 从未真实抓取
+        assert sum(s["yield_30d"]["selected"] for s in payload["sources"]) == 3
         assert len(payload["articles"]) == 1
         article = payload["articles"][0]
         assert article["mode"] in ("daily", "weekly")

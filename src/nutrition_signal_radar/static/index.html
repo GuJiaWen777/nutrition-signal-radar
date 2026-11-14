@@ -69,10 +69,10 @@
           </span>
         </div>
         <table>
-          <thead><tr><th>信源</th><th>类目</th><th>优先级</th><th>启用</th><th>健康</th><th>最后入库</th></tr></thead>
+          <thead><tr><th>信源</th><th>类目</th><th>优先级</th><th>启用</th><th>健康</th><th>30 天入选</th><th>最后入库</th></tr></thead>
           <tbody id="newsSourceRows"></tbody>
         </table>
-        <p class="table-note">sync_health=error 表示最近一轮抓取失败（留审计事件，不影响其他源）；「从未」表示启用后还没有抓到过条目。默认只看已启用源，取消勾选显示全部 36 个白名单。</p>
+        <p class="table-note">sync_health=error 表示最近一轮抓取失败，warning 表示从未产出条目（疑似解析失效），均留审计事件且不影响其他源；「30 天入选」为已入选/已评估条数，用于判断信源有效供给。默认只看已启用源，取消勾选显示全部白名单。</p>
       </div>
     </section>
 
@@ -88,6 +88,7 @@
         <div class="surface-title"><span>今日成文就绪度</span><span class="muted" id="newsReadinessAsOf"></span></div>
         <p id="newsReadinessDetail" class="readiness-detail"></p>
         <p class="table-note"><span id="newsReadinessStatus"></span> <span id="newsReadinessStats" class="muted"></span></p>
+        <p class="table-note"><span id="newsFetchFreshness" class="muted"></span></p>
       </div>
       <div class="surface table-wrap">
         <div class="surface-title"><span>近 7 天条目</span><span class="muted" id="newsItemSummary"></span></div>

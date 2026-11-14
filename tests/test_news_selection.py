@@ -12,6 +12,8 @@ from nutrition_signal_radar.ingest_service import import_article_batch
 from nutrition_signal_radar.news_fetch_service import fetch_enabled_news_sources
 from nutrition_signal_radar.news_registry import (
     configure_news_source,
+    list_news_sources,
+    news_source_yield,
     seed_news_sources,
     set_news_source_enabled,
 )
@@ -86,6 +88,12 @@ def test_selection_applies_admission_rules_sections_and_priorities(tmp_path: Pat
     # Running again is a no-op: every article is evaluated exactly once.
     second = evaluate_pending_news_articles(database_path)
     assert second.evaluated == 0
+
+    source = next(
+        item for item in list_news_sources(database_path) if item.name == "测试监管网"
+    )
+    stats = news_source_yield(database_path, now=NOW)
+    assert stats[source.id] == {"evaluated": 2, "selected": 1}
 
 
 def test_selection_rejects_incomplete_and_near_duplicate_items(tmp_path: Path) -> None:

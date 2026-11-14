@@ -37,7 +37,7 @@ flowchart TD
 
 | 事项 | 命令 / 位置 | 状态说明 |
 | --- | --- | --- |
-| 导入白名单提案 | `nutrition-radar news seed-sources` | 36 个种子信源，全部停用 |
+| 导入白名单提案 | `nutrition-radar news seed-sources` | 29 个种子信源，全部停用（当前库可在种子外手工新增） |
 | 审阅并确认名单 | `nutrition-radar news list-sources` | 人工确认是资讯线唯一固定的内容门禁 |
 | 启用确认的信源 | `nutrition-radar news set-source-enabled --name "XX" --enable` | 只有启用的信源会被抓取 |
 | 分析后端 | `.env` 的 `RADAR_LLM_*`（DeepSeek key） | `doctor` 报告 `llm_analysis_ready` |
@@ -101,7 +101,7 @@ schtasks /Create /TN "EarlyDataNewsDaily" /SC DAILY /ST 08:30 `
 4. **标题与本期速览**——钩子恰当，跨条目综合不牵强；
 5. **抽查一条原文链接**——能打开且是同一件事。
 
-看板「资讯线」标签页可在线预览成稿 HTML、质检结果与草稿箱推送状态，配合本清单使用；同一清单也常驻在看板页面上。
+同日修复后重出 v2+ 时，用 `news diff --slug <slug> --from <旧版本> --to <新版本>` 查看条目增删与摘要变化，再决定推哪一版；看板「资讯线」标签页可在线预览成稿 HTML、质检结果与草稿箱推送状态，配合本清单使用。
 
 **本地阅读站**：`news serve --port 8780 --open` 在独立端口直接展示成稿 HTML（首页为往期列表，`/a/<id>` 为成稿原文），只监听 127.0.0.1、只读，不进任何调度链；适合发布前通读与手机宽度预览。
 
@@ -121,7 +121,8 @@ schtasks /Create /TN "EarlyDataNewsDaily" /SC DAILY /ST 08:30 `
 
 ## 4. 健康检查与排障
 
-- `news list-sources`：查看每个信源的 `sync_health`（healthy / warning / error / paused）与最近抓取时间；`warning` 表示抓取成功但该源启用以来从未产出条目（疑似栏目页解析失效），需要核对 `entry_url` 与 `parser_config`；
+- `news list-sources`：查看每个信源的 `sync_health`（healthy / warning / error / paused）、近 30 天「入选/已评估」有效率与最近抓取时间；`warning` 表示抓取成功但该源启用以来从未产出条目（疑似栏目页解析失效），需要核对 `entry_url` 与 `parser_config`；输出末尾在整条链路超过 48h 未抓取时给出 `WARNING: 资讯抓取已停摆`；
+- `doctor` 的 `news_fetch` 检查使用同一份新鲜度数据：超过 48h 未抓取标记 WARNING，用于发现任务计划程序静默停止；
 - 单个信源失败不影响其他信源；`error` 源的错误摘要可在事件表中追溯；
 - 原始响应存档在 `var/raw/sites/YYYY-MM-DD/<域名>/`，用于核对解析问题；
 - 政府站点改版常导致列表页解析失败：先看 `var/raw/sites/` 快照确认页面结构变化，再调整该源 `entry_url` 或解析配置（`news configure-source` 更新 `parser_version`）；

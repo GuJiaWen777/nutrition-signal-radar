@@ -10,11 +10,13 @@ from nutrition_signal_radar.news_registry import (
     configure_news_source,
     list_enabled_news_sources,
     list_news_sources,
+    news_fetch_freshness,
     news_source_seed_count,
     seed_news_sources,
     set_news_source_enabled,
 )
 from nutrition_signal_radar.schema import MIGRATIONS, initialize_schema, inspect_schema
+from tests.test_site_fetch_gateway import NOW
 
 
 def test_news_source_seed_is_idempotent_and_keeps_sources_disabled(tmp_path: Path) -> None:
@@ -265,3 +267,52 @@ def test_news_cli_seeds_lists_configures_and_enables_sources(tmp_path: Path, cap
     human_output = capsys.readouterr().out
     assert human_output_code == 0
     assert "News whitelist: 30 total; 1 enabled." in human_output
+
+
+def test_news_fetch_freshness_tracks_stale_and_recent_runs(tmp_path: Path) -> None:
+    database_path = tmp_path / "var" / "radar.sqlite3"
+
+    missing = news_fetch_freshness(database_path)
+    assert missing["state"] == "not_initialized"
+    assert not database_path.exists()  # 只读检查不创建数据库
+
+    seed_news_sources(database_path)
+    set_news_source_enabled(
+        database_path, name="国家市场监督管理总局", enabled=True
+    )
+
+    never = news_fetch_freshness(database_path, now=NOW)
+    assert never["state"] == "stale"
+    assert never["stale"] is True
+    assert never["last_fetched_at"] is None
+    assert "国家市场监督管理总局" in never["never_fetched"]
+
+    connection = connect_database(database_path)
+    try:
+        with connection:
+            connection.execute(
+                "UPDATE news_sources SET last_fetched_at = ? WHERE enabled = 1",
+                ("2026-08-31T00:00:00.000Z",),
+            )
+    finally:
+        connection.close()
+
+    recent = news_fetch_freshness(database_path, now=NOW)
+    assert recent["state"] == "ok"
+    assert recent["stale"] is False
+    assert recent["age_hours"] == 1.0
+    assert recent["never_fetched"] == []
+
+
+def test_list_sources_includes_yield_and_freshness(tmp_path: Path, capsys) -> None:
+    root = tmp_path
+    main(["--project-root", str(root), "news", "seed-sources"])
+    capsys.readouterr()
+
+    code = main(["--project-root", str(root), "news", "list-sources", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert "fetch_freshness" in payload
+    assert payload["fetch_freshness"]["state"] == "no_sources"
+    assert all("yield_30d" in source for source in payload["sources"])

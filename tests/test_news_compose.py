@@ -1304,3 +1304,55 @@ def test_readiness_reports_skip_for_empty_pool(tmp_path: Path) -> None:
     dry_run = preview_news_build(database_path, now=NOW)
     assert dry_run["status"] == "skipped"
     assert dry_run["markdown"] == ""
+
+
+def test_news_diff_reports_changed_summaries(tmp_path: Path, capsys) -> None:
+    """同日 v1→v2 修复后，diff 按 manifest 条目列出摘要变化。"""
+
+    from nutrition_signal_radar.news_compose import diff_news_builds
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _seed_four_selected_items(database_path)
+    exports_dir = tmp_path / "var" / "exports" / "news-articles"
+    first = build_news_article(
+        database_path,
+        FakeComposeGateway(lambda _prompt: _valid_payload()),
+        exports_dir=exports_dir,
+        now=NOW,
+    )
+    def revised_payload() -> str:
+        # _valid_payload 用 json.dumps 的默认 ensure_ascii，直接对字符串
+        # replace 汉字不会命中；必须回到解析后的对象上改。
+        payload = json.loads(_valid_payload())
+        payload["summary"] = payload["summary"].replace("持续", "继续", 1)
+        return json.dumps(payload, ensure_ascii=False)
+
+    second = build_news_article(
+        database_path,
+        FakeComposeGateway(lambda _prompt: revised_payload()),
+        exports_dir=exports_dir,
+        now=NOW,
+    )
+    assert first.status == "built" and second.version == 2
+
+    diff = diff_news_builds(
+        database_path, slug=first.slug, from_version=1, to_version=2
+    )
+    assert diff["counts"] == {
+        "added": 0,
+        "removed": 0,
+        "changed": first.item_count,
+    }
+    assert all("summary" in item["fields"] for item in diff["changed"])
+    assert all(item["before"]["summary"] != item["after"]["summary"] for item in diff["changed"])
+
+    code = main(
+        [
+            "--project-root", str(tmp_path),
+            "news", "diff",
+            "--slug", first.slug, "--from", "1", "--to", "2", "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["counts"]["changed"] == first.item_count

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import RadarSettings
+from .news_registry import news_fetch_freshness
 from .schema import inspect_schema
 
 
@@ -28,6 +29,7 @@ def build_doctor_report(settings: RadarSettings) -> dict[str, Any]:
     pi_path = shutil.which("pi") or shutil.which("pi.exe") or ""
     pytest_available = importlib.util.find_spec("pytest") is not None
     schema_status = inspect_schema(settings.database_path)
+    freshness = news_fetch_freshness(settings.database_path)
 
     llm_status = "ok" if settings.llm_ready else "missing"
     if not settings.llm_ready and any((settings.llm_api_key, settings.llm_model)):
@@ -53,6 +55,11 @@ def build_doctor_report(settings: RadarSettings) -> dict[str, Any]:
             "database",
             _database_check_status(schema_status.state),
             f"{schema_status.detail} ({settings.database_path})",
+        ),
+        DoctorCheck(
+            "news_fetch",
+            _news_fetch_status(freshness),
+            _news_fetch_summary(freshness),
         ),
         DoctorCheck(
             "redfox",
@@ -116,6 +123,32 @@ def _llm_summary(settings: RadarSettings) -> str:
     if missing:
         return f"provider={settings.llm_provider or 'unset'}; missing {', '.join(missing)}"
     return f"provider={settings.llm_provider}; model={settings.llm_model}; base_url={settings.llm_base_url}"
+
+
+def _news_fetch_status(freshness: dict[str, Any]) -> str:
+    state = str(freshness.get("state") or "")
+    if state == "not_initialized":
+        return "missing"
+    if state == "stale":
+        return "warning"
+    return "ok"
+
+
+def _news_fetch_summary(freshness: dict[str, Any]) -> str:
+    state = str(freshness.get("state") or "")
+    if state == "not_initialized":
+        return "资讯线尚未初始化（news seed-sources）"
+    if state == "no_sources":
+        return "没有启用的资讯信源"
+    age = freshness.get("age_hours")
+    age_text = f"{age}h 前" if age is not None else "从未抓取"
+    enabled = int(freshness.get("enabled_count") or 0)
+    if state == "stale":
+        return (
+            f"最近抓取 {age_text}，超过 {freshness.get('stale_hours')}h 阈值；"
+            "请检查任务计划程序"
+        )
+    return f"最近抓取 {age_text}；{enabled} 个启用源"
 
 
 def _database_check_status(state: str) -> str:

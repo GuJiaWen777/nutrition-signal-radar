@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -423,6 +424,146 @@ def record_news_source_health(
     finally:
         connection.close()
     return _news_source(updated)
+
+
+_CST = timezone(timedelta(hours=8), name="Asia/Shanghai")
+
+
+def news_fetch_freshness(
+    database_path: Path,
+    *,
+    stale_hours: int = 48,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Report how recently the enabled whitelist was actually fetched.
+
+    This is the guard against a silently stopped scheduler: ``sync_health``
+    only describes the last attempt, while ``last_fetched_at`` ages even when
+    nothing runs.  Read-only; never initializes a missing database.
+    """
+
+    if stale_hours < 1:
+        raise NewsRegistryError("stale_hours must be at least 1")
+    if not Path(database_path).is_file():
+        return {
+            "state": "not_initialized",
+            "enabled_count": 0,
+            "fetched_count": 0,
+            "never_fetched": [],
+            "last_fetched_at": None,
+            "age_hours": None,
+            "stale": False,
+            "stale_hours": stale_hours,
+        }
+    connection = connect_database(database_path, readonly=True)
+    try:
+        rows = connection.execute(
+            "SELECT name, last_fetched_at FROM news_sources WHERE enabled = 1"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {
+            "state": "not_initialized",
+            "enabled_count": 0,
+            "fetched_count": 0,
+            "never_fetched": [],
+            "last_fetched_at": None,
+            "age_hours": None,
+            "stale": False,
+            "stale_hours": stale_hours,
+        }
+    finally:
+        connection.close()
+
+    never_fetched = [
+        str(row["name"]) for row in rows if not str(row["last_fetched_at"] or "").strip()
+    ]
+    timestamps = [
+        parsed
+        for row in rows
+        if (parsed := _parse_utc_timestamp(str(row["last_fetched_at"] or "")))
+        is not None
+    ]
+    current = now if now is not None else datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    latest = max(timestamps) if timestamps else None
+    age_hours = (
+        round((current - latest).total_seconds() / 3600, 1)
+        if latest is not None
+        else None
+    )
+    stale = bool(rows) and (latest is None or (age_hours or 0) > stale_hours)
+    return {
+        "state": "no_sources" if not rows else ("stale" if stale else "ok"),
+        "enabled_count": len(rows),
+        "fetched_count": len(timestamps),
+        "never_fetched": never_fetched,
+        "last_fetched_at": (
+            latest.isoformat().replace("+00:00", "Z") if latest is not None else None
+        ),
+        "age_hours": age_hours,
+        "stale": stale,
+        "stale_hours": stale_hours,
+    }
+
+
+def news_source_yield(
+    database_path: Path,
+    *,
+    days: int = 30,
+    now: datetime | None = None,
+) -> dict[int, dict[str, int]]:
+    """Count evaluated/selected items per source over the recent window."""
+
+    if days < 1:
+        raise NewsRegistryError("days must be at least 1")
+    if not Path(database_path).is_file():
+        return {}
+    current = now if now is not None else datetime.now(_CST)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=_CST)
+    else:
+        current = current.astimezone(_CST)
+    cutoff = (current - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    connection = connect_database(database_path, readonly=True)
+    try:
+        rows = connection.execute(
+            """
+            SELECT news_source_id,
+                   COUNT(*) AS evaluated,
+                   COALESCE(SUM(selected), 0) AS selected
+            FROM news_items
+            WHERE published_at IS NOT NULL AND published_at >= ?
+            GROUP BY news_source_id
+            """,
+            (cutoff,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    finally:
+        connection.close()
+    return {
+        int(row["news_source_id"]): {
+            "evaluated": int(row["evaluated"]),
+            "selected": int(row["selected"]),
+        }
+        for row in rows
+    }
+
+
+def _parse_utc_timestamp(value: str) -> datetime | None:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return None
+    try:
+        parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def news_source_seed_count() -> int:

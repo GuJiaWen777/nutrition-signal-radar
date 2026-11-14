@@ -39,3 +39,6 @@ def test_doctor_json_cli_is_machine_readable(tmp_path: Path, capsys) -> None:
     assert output["capabilities"]["scaffold_ready"] is True
     assert output["capabilities"]["live_redfox_ready"] is False
     assert output["capabilities"]["llm_analysis_ready"] is False
+    checks = {check["name"]: check for check in output["checks"]}
+    assert checks["news_fetch"]["status"] == "missing"
+    assert "尚未初始化" in checks["news_fetch"]["summary"]
