@@ -127,6 +127,54 @@ def test_push_news_draft_normalizes_errors_and_redacts_secret(tmp_path: Path) ->
         )
 
 
+def test_publish_refuses_article_with_failed_structural_qc(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """结构性 QC（来源完整性等）失败时，publish 必须拒绝推送。"""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _seed_four_selected_items(database_path)
+    result = build_news_article(
+        database_path,
+        FakeComposeGateway(lambda _prompt: _valid_payload()),
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        llm_model="deepseek-chat",
+        now=NOW,
+    )
+    assert result.status == "built"
+    qc_path = Path(result.detail) / "qc-log.json"
+    qc = json.loads(qc_path.read_text(encoding="utf-8"))
+    for check in qc["article_checks"]:
+        if check["check"] == "sources_complete":
+            check["passed"] = False
+    qc_path.write_text(json.dumps(qc, ensure_ascii=False), encoding="utf-8")
+
+    monkeypatch.setenv("WECHAT_APP_ID", "wx-app")
+    monkeypatch.setenv("WECHAT_APP_SECRET", "super-secret")
+    pushed: list[dict] = []
+    monkeypatch.setattr(cli, "push_news_draft", lambda **kwargs: pushed.append(kwargs))
+
+    code = main(
+        [
+            "--project-root",
+            str(tmp_path),
+            "news",
+            "publish",
+            "--live",
+            "--confirm",
+            "--slug",
+            result.slug,
+            "--version",
+            "1",
+            "--json",
+        ]
+    )
+
+    assert code == 1
+    assert pushed == []
+    assert "blocked by QC" in capsys.readouterr().err
+
+
 def test_news_publish_cli_gates_and_records_media_id(tmp_path: Path, capsys, monkeypatch) -> None:
     database_path = tmp_path / "var" / "radar.sqlite3"
     _seed_four_selected_items(database_path)
@@ -247,3 +295,66 @@ def test_news_publish_cli_gates_and_records_media_id(tmp_path: Path, capsys, mon
         assert row["wechat_pushed_at"]
     finally:
         connection.close()
+
+
+def test_news_qc_cli_reports_soft_and_hard_failures(tmp_path: Path, capsys) -> None:
+    """news qc 只读复核：total_length 失败仅软提示，结构性失败进入发布门禁。"""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _seed_four_selected_items(database_path)
+    result = build_news_article(
+        database_path,
+        FakeComposeGateway(lambda _prompt: _valid_payload()),
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        llm_model="deepseek-chat",
+        now=NOW,
+    )
+    assert result.status == "built"
+    qc_path = Path(result.detail) / "qc-log.json"
+
+    code = main(
+        [
+            "--project-root", str(tmp_path),
+            "news", "qc",
+            "--slug", result.slug, "--version", "1", "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["all_passed"] is True
+    assert payload["publish_blockers"] == []
+
+    qc = json.loads(qc_path.read_text(encoding="utf-8"))
+    for check in qc["article_checks"]:
+        if check["check"] == "total_length":
+            check["passed"] = False
+    qc_path.write_text(json.dumps(qc, ensure_ascii=False), encoding="utf-8")
+
+    code = main(
+        [
+            "--project-root", str(tmp_path),
+            "news", "qc",
+            "--slug", result.slug, "--version", "1", "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert "total_length" in payload["failed_checks"]
+    assert payload["publish_blockers"] == []
+
+    for check in qc["article_checks"]:
+        if check["check"] == "item_count":
+            check["passed"] = False
+    qc_path.write_text(json.dumps(qc, ensure_ascii=False), encoding="utf-8")
+
+    code = main(
+        [
+            "--project-root", str(tmp_path),
+            "news", "qc",
+            "--slug", result.slug, "--version", "1",
+        ]
+    )
+    output = capsys.readouterr().out
+    assert code == 1
+    assert "发布门禁：拒绝" in output
+    assert "item_count" in output

@@ -43,6 +43,9 @@ _REJECTION_CODES = {
 }
 _TITLE_NEAR_DUP_THRESHOLD = 0.92
 _MIN_TITLE_LENGTH = 6
+# 标题近似只在近期窗口内生效：年度重复事件（如「半年度财报」）隔年不应
+# 被旧标题误杀；URL/CMS 编号是精确身份，保留更长历史用于同文去重。
+_TITLE_DEDUP_WINDOW_DAYS = 60
 # Last path segment like /notice/182630200.html is treated as the same CMS
 # article even when the section prefix differs.
 _NUMERIC_PATH_ID = re.compile(r"^(\d{6,})(?:\.html?)?$", re.IGNORECASE)
@@ -495,15 +498,27 @@ def _assess_priority(
 
 
 def _load_recent_selected_index(connection: sqlite3.Connection) -> dict[str, object]:
-    rows = connection.execute(
-        "SELECT title, url FROM news_items WHERE selected = 1 ORDER BY id DESC LIMIT 500"
+    title_rows = connection.execute(
+        """
+        SELECT title FROM news_items
+        WHERE selected = 1
+          AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
+        ORDER BY id DESC LIMIT 500
+        """,
+        (f"-{_TITLE_DEDUP_WINDOW_DAYS} days",),
+    ).fetchall()
+    url_rows = connection.execute(
+        """
+        SELECT url FROM news_items
+        WHERE selected = 1 AND url IS NOT NULL
+        ORDER BY id DESC LIMIT 2000
+        """
     ).fetchall()
     url_keys: set[str] = set()
-    for row in rows:
-        if row["url"]:
-            url_keys |= set(url_identity_keys(str(row["url"])))
+    for row in url_rows:
+        url_keys |= set(url_identity_keys(str(row["url"])))
     return {
-        "titles": [_normalize_title(str(row["title"])) for row in rows],
+        "titles": [_normalize_title(str(row["title"])) for row in title_rows],
         "url_keys": url_keys,
     }
 

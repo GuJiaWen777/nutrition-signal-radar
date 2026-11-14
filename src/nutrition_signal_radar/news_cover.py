@@ -178,6 +178,7 @@ def _render_with_browser(
         except subprocess.TimeoutExpired as exc:
             last_error = f"timeout: {exc}"
         if output_path.is_file():
+            shutil.rmtree(profile_dir, ignore_errors=True)
             break
         shutil.rmtree(profile_dir, ignore_errors=True)
     if not output_path.is_file():

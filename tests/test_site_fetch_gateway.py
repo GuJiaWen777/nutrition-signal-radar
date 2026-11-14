@@ -8,7 +8,10 @@ import pytest
 from nutrition_signal_radar import cli
 from nutrition_signal_radar.cli import main
 from nutrition_signal_radar.database import connect_database
-from nutrition_signal_radar.news_fetch_service import fetch_enabled_news_sources
+from nutrition_signal_radar.news_fetch_service import (
+    NewsFetchError,
+    fetch_enabled_news_sources,
+)
 from nutrition_signal_radar.news_registry import (
     configure_news_source,
     list_news_sources,
@@ -306,6 +309,81 @@ def test_service_ingests_idempotently_and_records_health(tmp_path: Path) -> None
         assert [event["event_type"] for event in events][-1] == "fetch_succeeded"
     finally:
         connection.close()
+
+
+def test_service_marks_never_populated_source_as_warning(tmp_path: Path) -> None:
+    """抓取成功但从未产出条目的源应显性标记 warning，而不是 healthy。"""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+    _enable(
+        database_path,
+        name="测试空源",
+        domain="empty.example.com",
+        category="policy",
+        entry_url="https://empty.example.com/feed.xml",
+        fetch_kind="rss",
+        default_priority="P1",
+    )
+    empty_feed = (
+        '<?xml version="1.0"?><rss version="2.0"><channel>'
+        "<title>t</title></channel></rss>"
+    )
+    session = FakeSession()
+    session.queue("https://empty.example.com/feed.xml", FakeResponse(empty_feed))
+
+    report = fetch_enabled_news_sources(
+        database_path,
+        session=session,
+        lookback_hours=24,
+        max_items_per_source=30,
+        raw_dir=tmp_path / "var" / "raw" / "sites",
+        now=NOW,
+    )
+
+    assert report.outcomes[0].status == "no_items"
+    source = next(
+        item for item in list_news_sources(database_path) if item.name == "测试空源"
+    )
+    assert source.sync_health == "warning"
+    connection = connect_database(database_path, readonly=True)
+    try:
+        event = connection.execute(
+            "SELECT event_type, reason FROM news_source_events "
+            "WHERE news_source_id = ? ORDER BY id DESC LIMIT 1",
+            (source.id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert event["event_type"] == "fetch_empty"
+    assert "解析失效" in (event["reason"] or "")
+
+
+def test_service_rejects_unknown_source_filter(tmp_path: Path) -> None:
+    """--sources 拼错或指向停用源时直接报错，而不是静默抓 0 个源。"""
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+    _enable(
+        database_path,
+        name="测试监管网",
+        domain="example.gov.cn",
+        category="policy",
+        entry_url="https://www.example.gov.cn/feed.xml",
+        fetch_kind="rss",
+        default_priority="P0",
+    )
+
+    with pytest.raises(NewsFetchError, match="未启用或不存在的资讯信源"):
+        fetch_enabled_news_sources(
+            database_path,
+            session=FakeSession(),
+            lookback_hours=24,
+            max_items_per_source=30,
+            raw_dir=tmp_path / "var" / "raw" / "sites",
+            source_names=("拼错的源",),
+            now=NOW,
+        )
 
 
 def test_service_isolates_failures_across_sources(tmp_path: Path) -> None:

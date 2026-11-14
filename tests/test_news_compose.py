@@ -1220,3 +1220,87 @@ def test_source_table_carries_summaries_for_selected_rows(tmp_path: Path) -> Non
     for row in rows:
         if row["是否入选"] == "是":
             assert row["摘要"].startswith("本次监管动态"), row["标题"]
+
+
+def test_readiness_and_dry_run_share_the_build_pool(tmp_path: Path) -> None:
+    """看板/CLI 的就绪度与真实 build 使用同一候选池，且 dry-run 不落库。"""
+
+    from nutrition_signal_radar.news_compose import (
+        preview_news_build,
+        preview_news_readiness,
+    )
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    _enable_test_sources(database_path)
+    gov, brand, expo = "测试监管网", "测试品牌源", "测试展会源"
+    titles = [
+        "市场监管总局就保健食品原料目录公开征求意见",
+        "汤臣倍健发布半年度财报业绩稳健增长",
+        "NHNE健康营养博览会今日开幕",
+    ]
+    _seed_selected_direct(
+        database_path,
+        [
+            (gov, titles[0], "https://www.example.gov.cn/r/1", NOW - timedelta(hours=2)),
+            (brand, titles[1], "https://www.example-brand.com/r/1", NOW - timedelta(hours=3)),
+            (expo, titles[2], "https://www.example-expo.com/r/1", NOW - timedelta(hours=4)),
+        ],
+    )
+
+    readiness = preview_news_readiness(database_path, now=NOW)
+    assert readiness["ready"] is True
+    assert readiness["mode"] == "daily"
+    assert readiness["item_count"] == 3
+    assert readiness["daily"]["available"] == 3
+    assert len(readiness["items"]) == 3
+
+    dry_run = preview_news_build(database_path, now=NOW)
+    assert dry_run["status"] == "dry_run"
+    assert dry_run["mode"] == "daily"
+    assert dry_run["item_count"] == 3
+    assert "摘要占位" in dry_run["markdown"]
+    for title in titles:
+        assert title in dry_run["markdown"]
+
+    # dry-run/readiness 不写 news_articles，也不消耗条目。
+    connection = connect_database(database_path, readonly=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM news_articles").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM news_article_items").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+    result = build_news_article(
+        database_path,
+        FakeComposeGateway(lambda _prompt: _valid_payload()),
+        exports_dir=tmp_path / "var" / "exports" / "news-articles",
+        now=NOW,
+    )
+    assert result.status == "built"
+    assert result.mode == readiness["mode"]
+    assert result.item_count == readiness["item_count"]
+
+    # CLI readiness 可独立运行（无网络、无 LLM、不落库）。
+    code = main(
+        ["--project-root", str(tmp_path), "news", "readiness", "--json"]
+    )
+    assert code == 0
+
+
+def test_readiness_reports_skip_for_empty_pool(tmp_path: Path) -> None:
+    from nutrition_signal_radar.news_compose import (
+        preview_news_build,
+        preview_news_readiness,
+    )
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+
+    readiness = preview_news_readiness(database_path, now=NOW)
+    assert readiness["ready"] is False
+    assert readiness["mode"] == "skip"
+    assert readiness["item_count"] == 0
+
+    dry_run = preview_news_build(database_path, now=NOW)
+    assert dry_run["status"] == "skipped"
+    assert dry_run["markdown"] == ""

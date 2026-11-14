@@ -187,6 +187,7 @@ async function loadNews() {
     state.news = await response.json();
     state.newsLoaded = true;
     document.querySelector("#newsSourceEnabledOnly").addEventListener("change", renderNewsSources);
+    renderNewsReadiness();
     renderNewsSources();
     renderNewsItems();
     renderNewsArticles();
@@ -196,6 +197,29 @@ async function loadNews() {
 }
 
 const NEWS_CATEGORY = { policy: "政策", disclosure: "披露", brand: "品牌", expo: "展会", research: "科研" };
+
+function renderNewsReadiness() {
+  const readiness = state.news.readiness || {};
+  const detail = document.querySelector("#newsReadinessDetail");
+  const status = document.querySelector("#newsReadinessStatus");
+  const stats = document.querySelector("#newsReadinessStats");
+  const asOf = document.querySelector("#newsReadinessAsOf");
+  if (!readiness || readiness.error) {
+    detail.textContent = readiness.error || "就绪度暂不可用";
+    status.innerHTML = "";
+    stats.textContent = "";
+    asOf.textContent = "";
+    return;
+  }
+  asOf.textContent = readiness.as_of ? `截至 ${formatDateTime(readiness.as_of)}` : "";
+  detail.textContent = readiness.detail || "";
+  status.innerHTML = readiness.ready
+    ? `<span class="badge teal">可成文·${readiness.mode === "daily" ? "日报" : "周报"}</span>`
+    : '<span class="badge watch">今日跳过</span>';
+  const daily = readiness.daily || {};
+  const weekly = readiness.weekly || {};
+  stats.textContent = `24h 可用 ${daily.available ?? 0} 条 / 7 日可用 ${weekly.available ?? 0} 条 / 计划 ${readiness.item_count ?? 0} 条（目标 ${readiness.target_min ?? 0}–${readiness.target_max ?? 0}）`;
+}
 
 function renderNewsSources() {
   const sources = state.news.sources || [];

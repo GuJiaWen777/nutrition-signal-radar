@@ -408,7 +408,11 @@ def record_news_source_health(
             _record_event(
                 connection,
                 news_source_id=source_id,
-                event_type="fetch_succeeded" if health == "healthy" else "fetch_failed",
+                event_type={
+                    "healthy": "fetch_succeeded",
+                    "warning": "fetch_empty",
+                    "error": "fetch_failed",
+                }.get(health, "fetch_failed"),
                 actor=actor,
                 reason=(reason or "").strip()[:500] or None,
                 payload={"health": health},

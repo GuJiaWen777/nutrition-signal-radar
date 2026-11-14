@@ -51,7 +51,6 @@ _TITLE_REWRITE_SYSTEM_PROMPT = (
     "不得使用夸张、疾病治疗类表述或省略号。"
     '输出 JSON 对象：{"title": "改写后的标题"}。'
 )
-_MIN_ITEMS_FOR_DAILY = 3
 # 成文侧正文硬闸：快照去标签去空白后不足 60 字（与筛选层「已有真实正文」
 # 的 60 字标准一致）或正文与标题同文的条目，无法支撑 100-180 字摘要契约，
 # 在进入模型前剔除——「35 字进、150 字出」只会逼出复述式注水摘要。
@@ -93,6 +92,9 @@ _SYSTEM_PROMPT = (
     "竖线分段等编辑痕迹，改写为干净的新闻标题；若原标题本身干净则逐字返回；不得新增事实。\""
 )
 _SECTION_ORDER = ("policy", "brand_finance", "expo", "research")
+# 推送草稿箱前必须通过的 QC 项。total_length 是需求里的建议区间，保留为
+# 软提示（编辑可能有意压缩篇幅），结构性问题则一律硬拦。
+_PUBLISH_BLOCKING_CHECKS = ("item_count", "no_forbidden_terms", "sources_complete")
 _BRAND_COLORS = {
     "title": "#173B66",
     "info": "#2F6CAE",
@@ -165,33 +167,42 @@ class NewsBuildResult:
         }
 
 
-def build_news_article(
+@dataclass(frozen=True)
+class _CandidatePool:
+    """One deterministic candidate-pool snapshot shared by build/readiness/dry-run."""
+
+    current_time: datetime
+    daily_slug: str
+    weekly_slug: str
+    mode: str
+    items: list[dict[str, object]]
+    excluded: list[dict[str, str]]
+    merged: list[dict[str, object]]
+    daily_items: list[dict[str, object]]
+    weekly_items: list[dict[str, object]]
+    daily_dropped: list[dict[str, str]]
+    weekly_dropped: list[dict[str, str]]
+    daily_merged: list[dict[str, object]]
+    weekly_merged: list[dict[str, object]]
+
+    @property
+    def slug(self) -> str:
+        return self.daily_slug if self.mode == "daily" else self.weekly_slug
+
+    @property
+    def ready(self) -> bool:
+        return self.mode != "skip" and len(self.items) >= _MIN_ITEMS_TO_BUILD
+
+
+def _prepare_candidate_pool(
     database_path: Path,
-    gateway: NewsComposeGateway,
     *,
-    exports_dir: Path,
-    llm_model: str = "",
-    lookback_hours: int = 24,
-    max_items: int = _TARGET_ITEMS,
-    logo_path: Path | None = None,
-    actor: str = "news-build",
-    now: datetime | None = None,
-    fetch_lead_images: bool = False,
-) -> NewsBuildResult:
-    """Summarize selected items and assemble a versioned local article.
+    current_time: datetime,
+    lookback_hours: int,
+    max_items: int,
+) -> _CandidatePool:
+    """Load, dedupe, merge and gate candidates without any LLM/network call."""
 
-    ``fetch_lead_images`` 打开时，对入选条目逐条请求原文详情页提取配图
-    （最多 max_items 条、单条 12 秒超时、失败静默降级为纯文字）。
-    """
-
-    if lookback_hours < 1:
-        raise NewsComposeError("lookback_hours must be at least 1")
-    if not 1 <= max_items <= 10:
-        raise NewsComposeError("max_items must be between 1 and 10")
-    current_time = _ensure_cst(now) if now is not None else datetime.now(_CST)
-
-    # Slug 先于候选池确定：加载层要排除「已被其他期文章消耗」的条目，
-    # 同 slug 重build（当天修复后重出 v2+）豁免，保证重试看到同一候选池。
     daily_slug = _daily_slug_for(current_time)
     weekly_slug = _weekly_slug_for(current_time)
     daily_items, daily_dupes = _dedupe_items(
@@ -222,8 +233,261 @@ def build_news_article(
         merged_records.append(record)
         seen_merges.add(str(record["title"]))
     mode, items = _choose_item_pool(daily_items, weekly_items, max_items)
-    slug = daily_slug if mode == "daily" else weekly_slug
-    if mode == "skip" or len(items) < _MIN_ITEMS_TO_BUILD:
+
+    excluded: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for record in (*daily_dupes, *weekly_dupes, *daily_thin, *weekly_thin):
+        article_key = str(record["article_id"])
+        if article_key in seen_ids:
+            continue
+        excluded.append(record)
+        seen_ids.add(article_key)
+
+    return _CandidatePool(
+        current_time=current_time,
+        daily_slug=daily_slug,
+        weekly_slug=weekly_slug,
+        mode=mode,
+        items=items,
+        excluded=excluded,
+        merged=merged_records,
+        daily_items=daily_items,
+        weekly_items=weekly_items,
+        daily_dropped=(*daily_dupes, *daily_thin),
+        weekly_dropped=(*weekly_dupes, *weekly_thin),
+        daily_merged=daily_merges,
+        weekly_merged=weekly_merges,
+    )
+
+
+def _readiness_detail(pool: _CandidatePool) -> str:
+    daily_count = len(pool.daily_items)
+    item_count = len(pool.items)
+    if pool.mode == "daily":
+        return (
+            f"24h 可用 {daily_count} 条，7 日池补位后 {item_count} 条"
+            f" → 可成日报（目标 3–5 条）"
+        )
+    if pool.mode == "weekly":
+        return (
+            f"24h 可用 {daily_count} 条，补位后仍不足 3 条"
+            f" → 转周报形态（{item_count} 条，至少 2 条）"
+        )
+    return (
+        f"24h 可用 {daily_count} 条，去重/合并/正文硬闸后仅 {item_count} 条"
+        " → 今日跳过，不生成低价值文章"
+    )
+
+
+def preview_news_readiness(
+    database_path: Path,
+    *,
+    lookback_hours: int = 24,
+    max_items: int = _TARGET_ITEMS,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Read-only readiness snapshot for the dashboard and ``news readiness``.
+
+    Uses the exact same deterministic pool as ``build_news_article`` so the
+    dashboard can never promise a daily article the builder would refuse.
+    """
+
+    if lookback_hours < 1:
+        raise NewsComposeError("lookback_hours must be at least 1")
+    if not 1 <= max_items <= _TARGET_ITEMS:
+        raise NewsComposeError(f"max_items must be between 1 and {_TARGET_ITEMS}")
+    current_time = _ensure_cst(now) if now is not None else datetime.now(_CST)
+    pool = _prepare_candidate_pool(
+        database_path,
+        current_time=current_time,
+        lookback_hours=lookback_hours,
+        max_items=max_items,
+    )
+    target_min = _MIN_ITEMS_FOR_DAILY if pool.mode == "daily" else _MIN_ITEMS_TO_BUILD
+    return {
+        "as_of": current_time.isoformat(),
+        "mode": pool.mode,
+        "ready": pool.ready,
+        "slug": pool.slug if pool.mode != "skip" else "",
+        "item_count": len(pool.items),
+        "target_min": target_min,
+        "target_max": max_items,
+        "daily": {
+            "available": len(pool.daily_items),
+            "duplicates_dropped": sum(
+                1 for record in pool.daily_dropped
+                if record.get("reason", "").startswith("同事件")
+            ),
+            "thin_dropped": sum(
+                1 for record in pool.daily_dropped
+                if record.get("reason", "").startswith("thin_input")
+            ),
+            "merged_groups": len(pool.daily_merged),
+        },
+        "weekly": {
+            "available": len(pool.weekly_items),
+            "duplicates_dropped": sum(
+                1 for record in pool.weekly_dropped
+                if record.get("reason", "").startswith("同事件")
+            ),
+            "thin_dropped": sum(
+                1 for record in pool.weekly_dropped
+                if record.get("reason", "").startswith("thin_input")
+            ),
+            "merged_groups": len(pool.weekly_merged),
+        },
+        "excluded_total": len(pool.excluded),
+        "merged_total": len(pool.merged),
+        "items": [
+            {
+                "title": str(item.get("title") or ""),
+                "source_name": str(item.get("source_name") or ""),
+                "section": str(item.get("section") or ""),
+                "section_label": section_label(str(item.get("section") or "")),
+                "priority": str(item.get("priority") or ""),
+                "published_at": str(item.get("published_at") or ""),
+            }
+            for item in pool.items
+        ],
+        "detail": _readiness_detail(pool),
+    }
+
+
+def _dry_run_item(item: dict[str, object]) -> ComposedItem:
+    """Deterministic placeholder item so the template can be inspected."""
+
+    title = str(item.get("title") or "")
+    member_ids = tuple(
+        dict.fromkeys(
+            value
+            for value in (
+                int(item.get("news_item_id") or 0),
+                *(int(member) for member in item.get("member_news_item_ids") or ()),
+            )
+            if value > 0
+        )
+    )
+    return ComposedItem(
+        article_id=int(item["article_id"]),
+        source_name=str(item.get("source_name") or ""),
+        section=str(item.get("section") or ""),
+        priority=str(item.get("priority") or ""),
+        title=title,
+        url=str(item.get("url") or "").strip() or None,
+        published_at=str(item.get("published_at") or "").strip() or None,
+        summary=(
+            f"（摘要占位）{title}。正式 build 时由分析后端仅依据已抓取原文"
+            "生成 100–180 字摘要，不补充原文未出现的事实。"
+        ),
+        implication="（行业含义占位）",
+        keywords=(),
+        display_title=title,
+        key_facts=(),
+        news_item_id=int(item.get("news_item_id") or 0),
+        news_item_ids=member_ids,
+    )
+
+
+def preview_news_build(
+    database_path: Path,
+    *,
+    lookback_hours: int = 24,
+    max_items: int = _TARGET_ITEMS,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Render the article skeleton without any LLM call or DB/artifact write."""
+
+    if lookback_hours < 1:
+        raise NewsComposeError("lookback_hours must be at least 1")
+    if not 1 <= max_items <= _TARGET_ITEMS:
+        raise NewsComposeError(f"max_items must be between 1 and {_TARGET_ITEMS}")
+    current_time = _ensure_cst(now) if now is not None else datetime.now(_CST)
+    pool = _prepare_candidate_pool(
+        database_path,
+        current_time=current_time,
+        lookback_hours=lookback_hours,
+        max_items=max_items,
+    )
+    if not pool.ready:
+        return {
+            "status": "skipped",
+            "mode": pool.mode,
+            "slug": "",
+            "title": "",
+            "item_count": len(pool.items),
+            "detail": _readiness_detail(pool),
+            "markdown": "",
+            "items": [],
+        }
+    placeholders = [_dry_run_item(item) for item in pool.items]
+    article = _ArticleDocument(
+        mode=pool.mode,
+        title=_build_title(pool.mode, placeholders),
+        items=placeholders,
+        insights=(),
+        generated_at=current_time,
+        viewpoint="",
+    )
+    return {
+        "status": "dry_run",
+        "mode": pool.mode,
+        "slug": pool.slug,
+        "title": article.title,
+        "item_count": len(placeholders),
+        "detail": _readiness_detail(pool),
+        "markdown": _render_markdown(article),
+        "items": [
+            {
+                "title": item.title,
+                "source_name": item.source_name,
+                "section": item.section,
+                "priority": item.priority,
+                "published_at": item.published_at,
+            }
+            for item in placeholders
+        ],
+    }
+
+
+def build_news_article(
+    database_path: Path,
+    gateway: NewsComposeGateway,
+    *,
+    exports_dir: Path,
+    llm_model: str = "",
+    lookback_hours: int = 24,
+    max_items: int = _TARGET_ITEMS,
+    logo_path: Path | None = None,
+    actor: str = "news-build",
+    now: datetime | None = None,
+    fetch_lead_images: bool = False,
+) -> NewsBuildResult:
+    """Summarize selected items and assemble a versioned local article.
+
+    ``fetch_lead_images`` 打开时，对入选条目逐条请求原文详情页提取配图
+    （最多 max_items 条、单条 12 秒超时、失败静默降级为纯文字）。
+    """
+
+    if lookback_hours < 1:
+        raise NewsComposeError("lookback_hours must be at least 1")
+    # 需求明确反对「条数越多越好」：单篇上限固定为 _TARGET_ITEMS（5）。
+    if not 1 <= max_items <= _TARGET_ITEMS:
+        raise NewsComposeError(
+            f"max_items must be between 1 and {_TARGET_ITEMS}"
+        )
+    current_time = _ensure_cst(now) if now is not None else datetime.now(_CST)
+
+    # Slug 先于候选池确定：加载层要排除「已被其他期文章消耗」的条目，
+    # 同 slug 重build（当天修复后重出 v2+）豁免，保证重试看到同一候选池。
+    pool = _prepare_candidate_pool(
+        database_path,
+        current_time=current_time,
+        lookback_hours=lookback_hours,
+        max_items=max_items,
+    )
+    mode, items = pool.mode, pool.items
+    slug = pool.slug
+    if not pool.ready:
         return NewsBuildResult(
             status="skipped",
             slug=slug if mode != "skip" else f"news-{current_time:%Y-%m-%d}",
@@ -249,11 +513,11 @@ def build_news_article(
             for item in composed
         ]
     seen_dupe_ids = {row["article_id"] for row in excluded}
-    for record in (*daily_dupes, *weekly_dupes, *daily_thin, *weekly_thin):
+    for record in pool.excluded:
         if record["article_id"] in seen_dupe_ids:
             continue
         excluded.append(record)
-        seen_dupe_ids.add(record["article_id"])
+        seen_dupe_ids.add(str(record["article_id"]))
     if len(composed) < _MIN_ITEMS_TO_BUILD:
         return NewsBuildResult(
             status="skipped",
@@ -294,7 +558,7 @@ def build_news_article(
     html_text = _render_html(article)
     qc = _quality_checks(
         mode, composed, excluded, markdown,
-        insights=insights, merged=merged_records,
+        insights=insights, merged=pool.merged,
     )
 
     return _write_build(
@@ -469,7 +733,6 @@ def _filter_thin_inputs(
 _LEAD_IMAGE_TIMEOUT_SECONDS = 12.0
 # 通用装饰图通常带这些痕迹；带它们的一律不当作正文配图。
 _LEAD_IMAGE_BLOCKLIST = ("logo", "icon", "sprite", ".svg", ".gif", "qrcode", "captcha")
-nl = "\n"
 
 
 def _normalize_image_candidate(src: str, base_url: str, *, require_extension: bool) -> str:
@@ -849,7 +1112,7 @@ def _viewpoint_corpus(composed: list[ComposedItem]) -> str:
             [item.title, item.summary, item.implication, item.display_title]
         )
         parts.extend(fact.get("value", "") for fact in item.key_facts)
-    return nl.join(parts)
+    return "\n".join(parts)
 
 
 def _verify_viewpoint(text: str, composed: list[ComposedItem]) -> bool:
@@ -870,12 +1133,12 @@ def _compose_viewpoint(gateway, composed: list[ComposedItem]) -> str:
 
     if not composed:
         return ""
-    lines = nl.join(
+    lines = "\n".join(
         f"- {item.title}：{item.summary}（含义：{item.implication}）"
         for item in composed
     )
     user_prompt = (
-        f"本期标题与条目：{nl}{lines}{nl}请按系统约定输出 JSON。"
+        f"本期标题与条目：\n{lines}\n请按系统约定输出 JSON。"
     )
     for _ in range(_COMPOSE_MAX_RETRIES + 1):
         try:
@@ -1438,6 +1701,41 @@ def load_news_article_build(database_path: Path, *, slug: str, version: int) -> 
     }
 
 
+def news_publish_blockers(build_dir: Path) -> list[str]:
+    """Return hard QC failures that must stop a WeChat draft push.
+
+    ``total_length`` stays advisory: the requirement treats 1000–1800 字 as a
+    suggestion, and editors may deliberately run shorter.  Structural checks
+    (item count, red-line wording, complete sources) are not negotiable.
+    """
+
+    qc_path = Path(build_dir) / "qc-log.json"
+    if not qc_path.is_file():
+        return ["缺少 qc-log.json，无法确认稿件质量"]
+    try:
+        qc = json.loads(qc_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return ["qc-log.json 无法解析"]
+    checks = qc.get("article_checks") if isinstance(qc, dict) else None
+    if not isinstance(checks, list):
+        return ["qc-log.json 缺少 article_checks"]
+    failed = {
+        str(check.get("check"))
+        for check in checks
+        if isinstance(check, dict) and check.get("passed") is False
+    }
+    details = {
+        str(check.get("check")): str(check.get("detail") or "未通过")
+        for check in checks
+        if isinstance(check, dict)
+    }
+    return [
+        f"{name}：{details.get(name, '未通过')}"
+        for name in _PUBLISH_BLOCKING_CHECKS
+        if name in failed
+    ]
+
+
 def mark_news_article_pushed(
     database_path: Path, *, slug: str, version: int, media_id: str
 ) -> None:
@@ -1542,4 +1840,7 @@ __all__ = [
     "NewsBuildResult",
     "NewsComposeError",
     "build_news_article",
+    "news_publish_blockers",
+    "preview_news_build",
+    "preview_news_readiness",
 ]

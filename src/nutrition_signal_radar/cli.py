@@ -28,6 +28,9 @@ from .news_compose import (
     build_news_article,
     load_news_article_build,
     mark_news_article_pushed,
+    news_publish_blockers,
+    preview_news_build,
+    preview_news_readiness,
 )
 from .news_fetch_service import NewsFetchError, fetch_enabled_news_sources
 from .news_registry import (
@@ -437,9 +440,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--max-items",
         type=int,
         default=5,
-        help="Maximum items included in one article (default: 5).",
+        choices=range(1, 6),
+        help="Maximum items included in one article (default: 5; requirement caps at 5).",
+    )
+    news_build.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Render the deterministic skeleton with placeholder summaries; no LLM call, no artifacts.",
     )
     news_build.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    news_readiness = news_commands.add_parser(
+        "readiness",
+        help="Show whether today's pool can produce a daily/weekly article (no network, no LLM).",
+    )
+    news_readiness.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    news_qc = news_commands.add_parser(
+        "qc",
+        help="Re-read one build's QC log and publish gate (no network, no LLM).",
+    )
+    news_qc.add_argument("--slug", required=True, help="Built article slug, e.g. news-2026-09-01.")
+    news_qc.add_argument("--version", type=int, required=True, help="Built article version number.")
+    news_qc.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     news_publish = news_commands.add_parser(
         "publish",
         help="Push one built news article into the WeChat draft box (requires --live and credentials).",
@@ -1056,7 +1077,48 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                 return 0
 
+            if args.news_command == "readiness":
+                payload = preview_news_readiness(settings.database_path)
+                if args.json:
+                    print(json.dumps(payload, ensure_ascii=False, indent=2))
+                else:
+                    state = "可成文" if payload["ready"] else "跳过"
+                    mode = {
+                        "daily": "日报",
+                        "weekly": "周报形态",
+                        "skip": "不成文",
+                    }.get(str(payload["mode"]), str(payload["mode"]))
+                    print(f"今日成文就绪度：{state}（{mode}）")
+                    print(str(payload["detail"]))
+                    print(
+                        f"计划条目 {payload['item_count']} 条"
+                        f"（目标 {payload['target_min']}–{payload['target_max']}）"
+                    )
+                    for item in payload["items"]:
+                        print(
+                            f"- [{item['priority']}|{item['section_label']}] "
+                            f"{item['title']}（{item['source_name']}）"
+                        )
+                return 0
+
             if args.news_command == "build":
+                if args.dry_run:
+                    payload = preview_news_build(
+                        settings.database_path,
+                        lookback_hours=args.lookback_hours,
+                        max_items=args.max_items,
+                    )
+                    if args.json:
+                        print(json.dumps(payload, ensure_ascii=False, indent=2))
+                    elif payload["status"] == "skipped":
+                        print(f"Dry run skipped: {payload['detail']}")
+                    else:
+                        print(
+                            f"Dry run ({payload['mode']}) {payload['item_count']} items "
+                            f"→ {payload['slug']}: {payload['title']}"
+                        )
+                        print(payload["markdown"])
+                    return 0
                 if not args.live:
                     payload = {
                         "status": "protected",
@@ -1113,6 +1175,78 @@ def main(argv: Sequence[str] | None = None) -> int:
                             print(f"  - {file_name}")
                 return 0
 
+            if args.news_command == "qc":
+                try:
+                    build_info = load_news_article_build(
+                        settings.database_path,
+                        slug=args.slug,
+                        version=args.version,
+                    )
+                    build_dir = Path(str(build_info["build_dir"]))
+                    qc_path = build_dir / "qc-log.json"
+                    if not qc_path.is_file():
+                        print(f"QC log not found: {qc_path}", file=sys.stderr)
+                        return 1
+                    qc = json.loads(qc_path.read_text(encoding="utf-8"))
+                    blockers = news_publish_blockers(build_dir)
+                except (NewsComposeError, OSError, ValueError) as exc:
+                    print(f"News QC failed: {exc}", file=sys.stderr)
+                    return 1
+                checks = qc.get("article_checks") if isinstance(qc, dict) else []
+                checks = checks if isinstance(checks, list) else []
+                item_checks = qc.get("item_checks") if isinstance(qc, dict) else []
+                item_checks = item_checks if isinstance(item_checks, list) else []
+                bad_items = [
+                    check
+                    for check in item_checks
+                    if isinstance(check, dict)
+                    and (
+                        not check.get("summary_length_ok", True)
+                        or not check.get("fields_complete", True)
+                    )
+                ]
+                failed_checks = [
+                    str(check.get("check"))
+                    for check in checks
+                    if isinstance(check, dict) and check.get("passed") is False
+                ]
+                # 以检查明细为准，而不是只看历史 all_passed 字段：
+                # 手工修正 qc-log 后也能得到当前真实结论。
+                all_passed = (
+                    not failed_checks
+                    if checks
+                    else bool(qc.get("all_passed"))
+                )
+                payload = {
+                    "slug": args.slug,
+                    "version": args.version,
+                    "all_passed": all_passed,
+                    "article_checks": checks,
+                    "failed_checks": failed_checks,
+                    "item_checks_failed": bad_items,
+                    "publish_blockers": blockers,
+                }
+                if args.json:
+                    print(json.dumps(payload, ensure_ascii=False, indent=2))
+                else:
+                    status = "通过" if payload["all_passed"] else "未通过"
+                    print(f"QC {args.slug} v{args.version:03d}: {status}")
+                    for check in checks:
+                        if not isinstance(check, dict):
+                            continue
+                        mark = "OK  " if check.get("passed") else "FAIL"
+                        print(
+                            f"  [{mark}] {check.get('check')}: "
+                            f"{check.get('detail') or ''}"
+                        )
+                    if bad_items:
+                        print(f"  条目问题：{len(bad_items)} 条（摘要字数或字段缺失）")
+                    if blockers:
+                        print("发布门禁：拒绝 — " + "；".join(blockers))
+                    else:
+                        print("发布门禁：通过（total_length 仅为软提示）")
+                return 0 if payload["all_passed"] else 1
+
             if args.news_command == "serve":
                 run_news_reader_server(
                     settings.database_path, port=args.port, open_browser=args.open
@@ -1149,6 +1283,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                         print(
                             f"Already pushed as media_id {build_info['wechat_media_id']}; "
                             "no duplicate draft was created.",
+                            file=sys.stderr,
+                        )
+                        return 1
+                    blockers = news_publish_blockers(
+                        Path(str(build_info["build_dir"]))
+                    )
+                    if blockers:
+                        print(
+                            "News publish blocked by QC: " + "；".join(blockers),
                             file=sys.stderr,
                         )
                         return 1

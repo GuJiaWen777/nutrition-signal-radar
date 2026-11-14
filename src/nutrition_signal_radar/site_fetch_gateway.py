@@ -128,9 +128,10 @@ def fetch_site_source(
         proxy_cfg = json.loads(source.parser_config) if source.parser_config else {}
     except json.JSONDecodeError:
         proxy_cfg = {}
-    if isinstance(proxy_cfg, dict) and str(proxy_cfg.get("proxy") or "").lower() == "direct":
-        if session is not None:
-            session.trust_env = False
+    # 显式按源设置，而不是只关不开：同一轮 fetch 共用一个 Session，
+    # 若不复位，前面 direct 源的设置会泄漏到后续需要系统代理的源。
+    if isinstance(proxy_cfg, dict) and hasattr(session, "trust_env"):
+        session.trust_env = str(proxy_cfg.get("proxy") or "").lower() != "direct"
 
     if source.fetch_kind == "rss":
         raw_items, snapshot = _fetch_rss(session, source, raw_dir, current_time)

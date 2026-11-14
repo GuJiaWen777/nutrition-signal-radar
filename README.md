@@ -11,13 +11,14 @@
 | **资讯自动线（主线）** | 人工确认的白名单直采信源（政府/交易所/品牌官网/展会/科研组织） | 《营养健康行业资讯｜XXXX》栏目文章（每期 3–5 条，周一周四成文） | 自动写入公众号**草稿箱**；定时发布在公众号后台人工操作；**群发永远禁止** |
 | 行业信号线 | RedFox 监测公众号（发现源，待补证） | 行业信号卡、本周信号快报、可发布周报文章、深度研究稿 | 人工复制发布 |
 
-## 当前状态（2026-09-06）
+## 当前状态（2026-11-14）
 
 - 资讯线全链路已真实运行：36 个白名单源（**18 个已启用**，含浏览器渲染与按源代理策略），`fetch → select` 每日、`build` 周一/周四的调度节奏，跨期条目不重复（schema v17）。
 - 成文门槛「≥3 条日报 / ≥2 条周报形态 / 不足跳过」兜底；同模板备案公示合并成简讯、薄料（<60 字）硬闸不进模型，政策类细分国家级 P0 / 省市实质 P1 / 省市备案 P3；封面由入库模板 + 本机 Edge 无头截图生成（PIL 兜底）；LLM 只按已抓取原文摘要，不补充事实。
-- 微信草稿箱网关就绪（`news publish --live --confirm` 双重人工门禁，每稿限推一次），首次真实推送待操作者演练。
+- 微信草稿箱网关就绪（`news publish --live --confirm` 双重人工门禁，每稿限推一次；`item_count`/`no_forbidden_terms`/`sources_complete` 结构性 QC 未过时拒绝推送），首次真实推送待操作者演练。
 - 行业信号线按需运转（想做深度选题时跑一轮 sync → 快报 → 研究，见 [WEEKLY_WORKFLOW](docs/WEEKLY_WORKFLOW.md)；开放周次已过期，恢复时先关闭再新建）。
-- 测试基线：`pytest tests/` 全绿（212 项）。
+- 测试基线：`pytest tests/` 全绿（219 项）。
+- 本机最近一次成功抓取记录为 2026-09-09（`news_sources.last_fetched_at`）；若要继续周一周四成文，请先确认任务计划程序仍在运行。
 
 ## 快速上手
 
@@ -32,7 +33,10 @@ uv sync --extra dev
 .\.venv\Scripts\nutrition-radar.exe news fetch --live --lookback-hours 24          # 抓取已启用源
 .\.venv\Scripts\nutrition-radar.exe news select                      # 确定性筛选分级（无 LLM）
 .\.venv\Scripts\nutrition-radar.exe news list-items --selected-only  # 查看入选与落选理由
+.\.venv\Scripts\nutrition-radar.exe news readiness                  # 今日成文就绪度（无网络、无 LLM）
+.\.venv\Scripts\nutrition-radar.exe news build --dry-run            # 占位摘要骨架：条数/去重/标题，不调模型
 .\.venv\Scripts\nutrition-radar.exe news build --live                # 摘要成文 + 本地产物
+.\.venv\Scripts\nutrition-radar.exe news qc --slug news-YYYY-MM-DD --version 1   # 只读复核 QC 与发布门禁
 .\.venv\Scripts\nutrition-radar.exe news publish --live --confirm --slug news-YYYY-MM-DD --version 1
 # 本地阅读站（独立端口，直接展示成稿 HTML；只读，不进调度链）：
 .\.venv\Scripts\nutrition-radar.exe news serve --port 8780 --open

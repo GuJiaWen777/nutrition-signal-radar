@@ -162,6 +162,64 @@ def test_selection_rejects_incomplete_and_near_duplicate_items(tmp_path: Path) -
     assert [item.title for item in selected_only] == ["汤臣倍健发布半年度业绩报告净利增长"]
 
 
+def test_title_dedupe_ignores_selected_items_outside_window(tmp_path: Path) -> None:
+    """年度重复事件：60 天窗口外的旧标题不应误杀新一期。"""
+
+    from nutrition_signal_radar.database import connect_database
+
+    database_path = tmp_path / "var" / "radar.sqlite3"
+    seed_news_sources(database_path)
+    _enable(
+        database_path,
+        name="测试品牌源",
+        domain="example-brand.com",
+        category="brand",
+        entry_url="https://www.example-brand.com/feed.xml",
+        fetch_kind="rss",
+        default_priority="P1",
+    )
+    recent = (NOW - timedelta(hours=2)).astimezone(CST)
+
+    def _feed(title: str, link: str) -> str:
+        return f"""<?xml version="1.0"?>
+        <rss version="2.0"><channel><title>t</title>
+          <item><title>{title}</title>
+            <link>{link}</link>
+            <pubDate>Mon, {recent:%d %b %Y} 07:00:00 +0800</pubDate>
+            <description>公司发布半年度业绩报告，保健食品业务稳健增长。</description></item>
+        </channel></rss>"""
+
+    _ingest_rss(
+        database_path,
+        _feed("汤臣倍健发布半年度业绩报告净利增长", "https://www.example-brand.com/old/1"),
+        entry_url="https://www.example-brand.com/feed.xml",
+        name="测试品牌源",
+    )
+    assert evaluate_pending_news_articles(database_path).selected == 1
+
+    # 把历史入选记录推到 60 天窗口外（URL 身份仍保留）。
+    connection = connect_database(database_path)
+    try:
+        with connection:
+            connection.execute(
+                "UPDATE news_items SET created_at = "
+                "strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-90 days')"
+            )
+    finally:
+        connection.close()
+
+    _ingest_rss(
+        database_path,
+        _feed("汤臣倍健发布半年度业绩报告净利增长", "https://www.example-brand.com/new/1"),
+        entry_url="https://www.example-brand.com/feed.xml",
+        name="测试品牌源",
+    )
+    report = evaluate_pending_news_articles(database_path)
+
+    assert report.selected == 1
+    assert "duplicate_title" not in report.rejection_counts
+
+
 def test_selection_expo_preview_maps_to_p3_and_plain_expo_to_p2(tmp_path: Path) -> None:
     database_path = tmp_path / "var" / "radar.sqlite3"
     seed_news_sources(database_path)

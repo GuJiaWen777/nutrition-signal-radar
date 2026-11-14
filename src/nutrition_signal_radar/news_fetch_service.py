@@ -9,6 +9,7 @@ caller passes a real HTTP session, which the CLI does behind ``--live``.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import re
 from dataclasses import dataclass, replace
@@ -99,7 +100,7 @@ _DETAIL_ENRICH_MIN_CHARS = 60
 
 
 def _extract_article_text(html_text: str) -> str:
-    cleaned = re.sub(r"<(script|style)[\s\S]*?</>", " ", html_text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<(script|style)[\s\S]*?</(?:script|style)>", " ", html_text, flags=re.IGNORECASE)
     paragraphs: list[str] = []
     for match in re.finditer(r"<p[^>]*>([\s\S]*?)</p>", cleaned, re.IGNORECASE):
         text = html.unescape(re.sub(r"<[^>]+>", "", match.group(1)))
@@ -148,7 +149,9 @@ def _enrich_headline_items(session, source, items, raw_dir: Path):
             detail_dir = Path(raw_dir) / source.domain
             detail_dir.mkdir(parents=True, exist_ok=True)
             stamp = re.sub(r"[^0-9]", "", str(item.published_at or ""))[:8] or "nodate"
-            token = f"{abs(hash(url)) % 10**8:08d}"
+            # 用内容哈希而非 Python 的随机化字符串 hash：同一 URL 的快照
+            # 文件名跨进程可复现，便于审计与去重。
+            token = hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
             (detail_dir / f"detail-{stamp}-{token}.html").write_text(
                 page, encoding="utf-8", errors="ignore"
             )
@@ -181,9 +184,18 @@ def fetch_enabled_news_sources(
 
     http_session = session if session is not None else requests.Session()
     wanted = {name.strip() for name in source_names if str(name).strip()}
+    enabled_sources = list_enabled_news_sources(database_path)
+    if wanted:
+        unknown = sorted(wanted - {source.name for source in enabled_sources})
+        if unknown:
+            # 显式报错而不是静默抓 0 个源：拼错名字或误用停用源时，
+            # 调度日志必须能立刻看出问题。
+            raise NewsFetchError(
+                "未启用或不存在的资讯信源：" + "、".join(unknown)
+            )
     sources = [
         source
-        for source in list_enabled_news_sources(database_path)
+        for source in enabled_sources
         if not wanted or source.name in wanted
     ]
 
@@ -331,12 +343,23 @@ def _fetch_one(
             error=str(exc)[:500],
         )
 
+    # 「healthy」只代表本轮请求与解析没抛错；对从未产出过条目的源，
+    # 连续 0 条是解析器失效的强信号，记为 warning 让看板/CLI 能看见。
+    health = "healthy"
+    health_reason: str | None = None
+    if not articles and source.last_item_at is None:
+        health = "warning"
+        health_reason = (
+            "本轮窗口内 0 条，且该源启用以来从未产出条目；"
+            "疑似栏目页解析失效，请核对 entry_url 与 parser_config"
+        )
     record_news_source_health(
         database_path,
         source_id=source.id,
-        health="healthy",
+        health=health,
         latest_item_at=latest_item_at,
         actor=actor,
+        reason=health_reason,
     )
     return NewsSourceFetchOutcome(
         source_name=source.name,

@@ -6,7 +6,7 @@ import sqlite3
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, quote, urlparse
@@ -23,6 +23,7 @@ from .cycle_service import (
 )
 from .database import connect_database
 from .demo_pipeline import DEMO_GENERATOR
+from .news_compose import preview_news_readiness
 from .news_registry import list_news_sources
 from .redfox_gateway import RedFoxGateway, RedFoxGatewayError
 from .research_workflow import (
@@ -76,6 +77,7 @@ from .weekly_service import (
 )
 
 
+_CST = timezone(timedelta(hours=8), name="Asia/Shanghai")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -153,6 +155,7 @@ def create_demo_server(
     article_runner: WeeklyArticleRunner | None = None,
     research_runner: OnlineResearchRunner | None = None,
     sync_runner: Callable[[Path, date, date], object] | None = None,
+    now: datetime | None = None,
 ) -> ThreadingHTTPServer:
     database = database_path.resolve()
     initialize_schema(database)
@@ -164,6 +167,7 @@ def create_demo_server(
         article_runner=article_runner,
         research_runner=research_runner,
         sync_runner=sync_runner,
+        now=now,
     )
     return ThreadingHTTPServer(("127.0.0.1", port), handler)
 
@@ -197,9 +201,13 @@ def _handler_for(
     article_runner: WeeklyArticleRunner | None = None,
     research_runner: OnlineResearchRunner | None = None,
     sync_runner: Callable[[Path, date, date], object] | None = None,
+    now: datetime | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     handler_workspace_label = workspace_label
     handler_workspace_kind = workspace_kind
+    # 资讯线看板的「最近 7 天」窗口按构建时刻计算；测试注入固定 now，
+    # 避免用例随真实日期推移而失效。
+    handler_now = now
 
     class DemoHandler(BaseHTTPRequestHandler):
         server_version = "NutritionRadarDemo/0.1"
@@ -235,7 +243,7 @@ def _handler_for(
                 )
                 return
             if path == "/api/news":
-                self._send_json(_news_payload(database_path))
+                self._send_json(_news_payload(database_path, now=handler_now))
                 return
             news_preview_match = re.fullmatch(r"/api/news/articles/(\d+)/preview", path)
             if news_preview_match:
@@ -1024,7 +1032,9 @@ def _handler_for(
     return DemoHandler
 
 
-def _news_payload(database_path: Path, *, item_days: int = 7) -> dict[str, Any]:
+def _news_payload(
+    database_path: Path, *, item_days: int = 7, now: datetime | None = None
+) -> dict[str, Any]:
     """Read-only snapshot for the news-line tab: sources, items, articles.
 
     资讯线在看板中只读：不提供启用、成文或推送入口——那些动作保留在
@@ -1052,19 +1062,29 @@ def _news_payload(database_path: Path, *, item_days: int = 7) -> dict[str, Any]:
                 }
             )
 
-        since = f"datetime('now', '-{max(1, item_days)} days')"
+        # published_at 以本地（CST）无时区字符串存储；用 Python 计算截止
+        # 时间，既避免 SQLite datetime('now') 的 UTC 偏移，也让测试可注入 now。
+        current = now if now is not None else datetime.now(_CST)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=_CST)
+        else:
+            current = current.astimezone(_CST)
+        since = (current - timedelta(days=max(1, item_days))).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
         item_rows = connection.execute(
-            f"""
+            """
             SELECT id, title, source_name, published_at, priority, selected,
                    rejection_reasons
             FROM news_items
-            WHERE published_at IS NOT NULL AND published_at >= {since}
+            WHERE published_at IS NOT NULL AND published_at >= ?
             ORDER BY selected DESC,
                      CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1
                       WHEN 'P2' THEN 2 ELSE 3 END,
                  published_at DESC
             LIMIT 60
-            """
+            """,
+            (since,),
         ).fetchall()
         items = []
         for row in item_rows:
@@ -1144,6 +1164,18 @@ def _news_payload(database_path: Path, *, item_days: int = 7) -> dict[str, Any]:
     finally:
         connection.close()
 
+    # 与 build 使用同一套候选池逻辑；计算失败只降级该卡片，不影响整页。
+    try:
+        readiness: dict[str, object] = preview_news_readiness(
+            database_path, now=now
+        )
+    except Exception as exc:  # pragma: no cover - defensive dashboard fallback
+        readiness = {
+            "ready": False,
+            "mode": "unknown",
+            "detail": f"就绪度计算失败：{exc}",
+        }
+
     return {
         "sources": sources,
         "enabled_count": sum(1 for s in sources if s["enabled"]),
@@ -1151,6 +1183,7 @@ def _news_payload(database_path: Path, *, item_days: int = 7) -> dict[str, Any]:
         "selected_count": sum(1 for i in items if i["selected"]),
         "articles": articles,
         "item_days": item_days,
+        "readiness": readiness,
     }
 
 

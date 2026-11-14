@@ -945,9 +945,11 @@ def test_news_tab_api_serves_sources_items_and_article_list(tmp_path: Path) -> N
     from urllib.request import urlopen
 
     from nutrition_signal_radar.web_app import create_demo_server as _create
+    from tests.test_site_fetch_gateway import NOW as SEED_NOW
 
     database_path = _seed_news_build(tmp_path)
-    server = _create(database_path, port=0)
+    # 看板的 7 日窗口按注入时刻计算，测试不随真实日期漂移。
+    server = _create(database_path, port=0, now=SEED_NOW)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_port}"
@@ -957,6 +959,10 @@ def test_news_tab_api_serves_sources_items_and_article_list(tmp_path: Path) -> N
         assert payload["enabled_count"] >= 3
         assert any(source["name"] == "测试监管网" for source in payload["sources"])
         assert payload["selected_count"] == 3
+        readiness = payload["readiness"]
+        assert readiness["ready"] is True
+        assert readiness["mode"] == "daily"
+        assert readiness["item_count"] == 3
         assert len(payload["articles"]) == 1
         article = payload["articles"][0]
         assert article["mode"] in ("daily", "weekly")

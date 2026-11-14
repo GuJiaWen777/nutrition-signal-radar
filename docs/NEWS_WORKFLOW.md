@@ -37,7 +37,7 @@ flowchart TD
 
 | 事项 | 命令 / 位置 | 状态说明 |
 | --- | --- | --- |
-| 导入白名单提案 | `nutrition-radar news seed-sources` | 29 个建议信源，全部停用 |
+| 导入白名单提案 | `nutrition-radar news seed-sources` | 36 个种子信源，全部停用 |
 | 审阅并确认名单 | `nutrition-radar news list-sources` | 人工确认是资讯线唯一固定的内容门禁 |
 | 启用确认的信源 | `nutrition-radar news set-source-enabled --name "XX" --enable` | 只有启用的信源会被抓取 |
 | 分析后端 | `.env` 的 `RADAR_LLM_*`（DeepSeek key） | `doctor` 报告 `llm_analysis_ready` |
@@ -61,6 +61,15 @@ schtasks /Create /TN "EarlyDataNewsDaily" /SC DAILY /ST 08:30 `
 .\.venv\Scripts\nutrition-radar.exe news build --live                       # 摘要成文 + 本地产物
 ```
 
+成文前可先做零成本预检（无网络、无 LLM、不落库）：
+
+```powershell
+.\.venv\Scripts\nutrition-radar.exe news readiness        # 今日能否成文：24h 可用 / 7 日补位 / 日报或周报
+.\.venv\Scripts\nutrition-radar.exe news build --dry-run  # 用占位摘要渲染骨架，先看条数、去重与标题
+```
+
+`news readiness` 与 `news build` 共用同一候选池逻辑，看板「资讯线」页也会显示同一份就绪度；`--dry-run` 只打印 Markdown 骨架，不写产物、不消耗条目。成文后可随时用 `news qc --slug <slug> --version <N>` 复核既有 QC 日志与发布门禁。
+
 产物位于 `var/exports/news-articles/<slug>/vNNN/`：
 
 - `news-article.html`：内联样式排版，可直接粘贴公众号编辑器；
@@ -83,6 +92,8 @@ schtasks /Create /TN "EarlyDataNewsDaily" /SC DAILY /ST 08:30 `
 ## 3. 发布（人工确认，手动触发）
 
 **发布前复核清单**（约 3 分钟；自动化 QC 只管形式，语义层只有人能拦）：
+
+> 结构性 QC（`item_count` / `no_forbidden_terms` / `sources_complete`）未通过时，`news publish` 会直接拒绝推送；`total_length`（需求建议 1000–1800 字）保留为软提示，编辑可在看板确认后自行判断。推送前可用 `news qc --slug <slug> --version <N>` 以只读方式复核同一份日志。
 
 1. **摘要忠实原文**——「征求意见稿」没有被说成「已实施」，日期与主体无误（子串校验防编造数字，防不了语义走样）；
 2. **条目确实相关**——擦边弱相关条目剔除，关键词规则拦不住语义层；
@@ -110,7 +121,7 @@ schtasks /Create /TN "EarlyDataNewsDaily" /SC DAILY /ST 08:30 `
 
 ## 4. 健康检查与排障
 
-- `news list-sources`：查看每个信源的 `sync_health`（healthy / error / paused）与最近抓取时间；
+- `news list-sources`：查看每个信源的 `sync_health`（healthy / warning / error / paused）与最近抓取时间；`warning` 表示抓取成功但该源启用以来从未产出条目（疑似栏目页解析失效），需要核对 `entry_url` 与 `parser_config`；
 - 单个信源失败不影响其他信源；`error` 源的错误摘要可在事件表中追溯；
 - 原始响应存档在 `var/raw/sites/YYYY-MM-DD/<域名>/`，用于核对解析问题；
 - 政府站点改版常导致列表页解析失败：先看 `var/raw/sites/` 快照确认页面结构变化，再调整该源 `entry_url` 或解析配置（`news configure-source` 更新 `parser_version`）；
